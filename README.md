@@ -1,4 +1,4 @@
-# TextLens — Document Intelligence Platform
+# TextLens Document Intelligence Platform
 
 Production-grade OCR platform. Extract, analyze, transform documents.
 

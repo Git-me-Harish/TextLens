@@ -4,6 +4,7 @@ import { Upload, ChevronRight, RotateCcw, Download, Copy, Check, AlertTriangle, 
 import toast from "react-hot-toast";
 import api from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
+import { useAgent } from "../lib/AgentContext";
 
 function Steps({ current }) {
   const steps = ["Extract", "Choose Pipeline", "Run Agent", "Results"];
@@ -94,6 +95,7 @@ function StructuredResult({ data, depth = 0 }) {
 }
 
 export default function PipelinesPage() {
+  const { startAgent, clearAgent } = useAgent();
   const [step, setStep] = useState(0);
   const [catalog, setCatalog] = useState(null);
   const [ocrJob, setOcrJob] = useState(null);
@@ -117,6 +119,7 @@ export default function PipelinesPage() {
       setAgentRun(data);
       if (data.status === "completed" || data.status === "failed") {
         clearInterval(t); setPolling(false); setStep(3);
+        clearAgent();
         data.status === "completed" ? toast.success("Pipeline complete") : toast.error("Pipeline failed");
       }
     }, 2000);
@@ -156,11 +159,12 @@ export default function PipelinesPage() {
     try {
       const { data } = await api.post("/agents/run", { job_id: ocrJob.id, domain: selectedDomain, pipeline_type: selectedPipeline, user_instructions: instructions });
       setAgentRun(data);
+      startAgent(selectedDomain, selectedPipeline, catalog[selectedDomain]?.pipelines[selectedPipeline]?.label);
     } catch (err) { toast.error(err.response?.data?.detail || "Failed to start agent"); setStep(1); }
     finally { setRunning(false); }
   };
 
-  const reset = () => { setStep(0); setOcrJob(null); setSelectedDomain(null); setSelectedPipeline(null); setAgentRun(null); setInstructions(""); };
+  const reset = () => { setStep(0); setOcrJob(null); setSelectedDomain(null); setSelectedPipeline(null); setAgentRun(null); setInstructions(""); clearAgent(); };
 
   const copyJSON = () => {
     navigator.clipboard.writeText(JSON.stringify(agentRun?.structured_result, null, 2));

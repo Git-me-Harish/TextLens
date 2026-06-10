@@ -6,6 +6,8 @@ import { useAuth } from "../lib/AuthContext";
 import { Input, Button } from "../components/ui";
 import api from "../lib/api";
 
+const LOGOS = ["Anthropic", "LangChain", "Tesseract", "FastAPI", "HuggingFace", "LangGraph"];
+
 export default function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
@@ -35,19 +37,55 @@ export default function LoginPage() {
     <div className="auth-page">
       <div className="auth-brand">
         <div style={{ maxWidth: 420 }}>
+          {/* FIX: "Text" = white, "Lens" = accent blue */}
           <div style={{ fontFamily: "var(--font-display)", fontSize: "2.5rem", fontWeight: 300, marginBottom: "1.5rem", lineHeight: 1.2 }}>
-            Text<span style={{ color: "#93c5fd" }}>Lens</span>
+            <span style={{ color: "#ffffff" }}>Text</span><span style={{ color: "#93c5fd" }}>Lens</span>
           </div>
-          <p style={{ fontSize: "1.15rem", color: "rgba(255,255,255,0.7)", lineHeight: 1.7, marginBottom: "2.5rem" }}>
+          <p style={{ fontSize: "1.15rem", color: "rgba(255,255,255,0.7)", lineHeight: 1.7, marginBottom: "2rem" }}>
             Extract, analyze, and transform your documents with precision OCR technology.
           </p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "1rem", marginBottom: "2rem" }}>
             {["Image OCR — extract text from any image", "PDF Intelligence — structure & summarize", "Document Q&A — ask questions, get answers", "Export to Word — one-click conversion"].map(f => (
               <div key={f} style={{ display: "flex", alignItems: "center", gap: 10, color: "rgba(255,255,255,0.65)", fontSize: "0.88rem" }}>
                 <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#93c5fd", flexShrink: 0 }} />
                 {f}
               </div>
             ))}
+          </div>
+
+          {/* Demo GIF */}
+          <div style={{ borderRadius: "var(--radius-lg)", overflow: "hidden", border: "1px solid rgba(255,255,255,0.1)", marginBottom: "2rem" }}>
+            <img
+              src="/Login.gif"
+              alt="TextLens demo"
+              style={{ width: "100%", display: "block", maxHeight: 220, objectFit: "cover" }}
+            />
+          </div>
+
+          {/* Logo carousel */}
+          <div style={{ overflow: "hidden", maskImage: "linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%)", WebkitMaskImage: "linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%)" }}>
+            <div style={{ display: "flex", gap: "2.5rem", animation: "logoScroll 18s linear infinite", width: "max-content" }}>
+              {[...LOGOS, ...LOGOS].map((name, i) => (
+                <span
+                  key={i}
+                  style={{
+                    fontSize: "0.78rem",
+                    fontWeight: 600,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                    color: "rgba(255,255,255,0.3)",
+                    whiteSpace: "nowrap",
+                    flexShrink: 0,
+                    transition: "color 200ms ease",
+                    cursor: "default",
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.color = "rgba(255,255,255,0.85)"}
+                  onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.3)"}
+                >
+                  {name}
+                </span>
+              ))}
+            </div>
           </div>
         </div>
       </div>

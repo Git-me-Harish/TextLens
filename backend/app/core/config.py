@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE_MB: int = 50
     RATE_LIMIT_PER_MINUTE: int = 30
     ENVIRONMENT: str = "development"
-    ANTHROPIC_API_KEY: str = ""   # set this in .env to enable agents
+    ANTHROPIC_API_KEY: str = ""   
+    GROQ_API_KEY: str = ""  
 
     class Config:
         env_file = ".env"

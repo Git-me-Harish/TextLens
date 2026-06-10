@@ -125,11 +125,24 @@ textarea.form-input { resize: vertical; min-height: 80px; }
 }
 
 /* ---- Auth ---- */
-.auth-page { min-height: 100vh; display: grid; grid-template-columns: 1fr 1fr; }
+.auth-page { min-height: 100vh; display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
 @media (max-width: 768px) { .auth-page { grid-template-columns: 1fr; } .auth-brand { display: none; } }
-.auth-brand { background: var(--ink); display: flex; flex-direction: column; justify-content: center; padding: 3rem; }
-.auth-form-side { display: flex; flex-direction: column; justify-content: center; padding: 3rem; max-width: 460px; margin: 0 auto; width: 100%; }
+.auth-brand {
+  background: var(--ink);
+  display: flex;
+  flex-direction: column;
+  justify-content: center; 
+  padding: 3rem;
+  overflow-y: auto;           
+}
+.auth-form-side { display: flex; flex-direction: column; justify-content: center; padding: 3rem; max-width: 460px; margin: 0 auto; width: 100%; overflow-y: auto; }
 @media (max-width: 768px) { .auth-form-side { padding: 2rem 1.5rem; } }
+
+/* Logo carousel keyframe */
+@keyframes logoScroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
 
 /* ---- Pagination ---- */
 .pagination { display: flex; align-items: center; gap: 6px; justify-content: center; margin-top: 1.5rem; }

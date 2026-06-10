@@ -69,6 +69,8 @@ async def start_agent_run(
     await db.flush()
     await db.refresh(run)
     run_id = run.id
+    await db.commit()   # must commit before background task reads this row
+    await db.refresh(run)
     background_tasks.add_task(execute_agent_run, run_id, data.domain, data.pipeline_type, ocr_job.result_text, data.user_instructions or "")
     return run
 

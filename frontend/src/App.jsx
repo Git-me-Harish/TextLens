@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
 import { AuthProvider } from "./lib/AuthContext";
+import { AgentProvider } from "./lib/AgentContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import AppLayout from "./components/layout/AppLayout";
 import LoginPage from "./pages/LoginPage";
@@ -14,6 +15,9 @@ import PDFChatPage from "./pages/PDFChatPage";
 import PipelinesPage from "./pages/PipelinesPage";
 import AgentHistoryPage from "./pages/AgentHistoryPage";
 import { ImageOCRPage, PDFExtractPage, SummarizePage, PDFToWordPage } from "./pages/ToolPages";
+import ApiKeysPage from "./pages/ApiKeysPage";
+import BatchPage from "./pages/BatchPage";
+import ChatHistoryPage from "./pages/ChatHistoryPage";
 
 function PL({ children }) {
   return <ProtectedRoute><AppLayout>{children}</AppLayout></ProtectedRoute>;
@@ -22,6 +26,7 @@ function PL({ children }) {
 export default function App() {
   return (
     <AuthProvider>
+      <AgentProvider>
       <BrowserRouter>
         <Toaster position="top-right" toastOptions={{ duration: 3500, style: { fontFamily: "var(--font-body)", fontSize: "0.875rem" } }} />
         <Routes>
@@ -41,10 +46,16 @@ export default function App() {
           <Route path="/tools/pdf-to-word" element={<PL><PDFToWordPage /></PL>} />
           <Route path="/tools/pdf-chat" element={<PL><PDFChatPage /></PL>} />
 
+          <Route path="/api-keys" element={<PL><ApiKeysPage /></PL>} />
+          <Route path="/webhooks" element={<PL><ApiKeysPage /></PL>} />
+          <Route path="/batch" element={<PL><BatchPage /></PL>} />
+          <Route path="/chat-history" element={<PL><ChatHistoryPage /></PL>} />
+
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </BrowserRouter>
+    </AgentProvider>
     </AuthProvider>
   );
 }

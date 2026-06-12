@@ -312,8 +312,7 @@ print(response.json())`}
   );
 }
 
-/* ─────────────────────────────── Webhooks ────────────────────────── */
-
+//Webhooks:
 const ALL_EVENTS = [
   { value: "job.completed",   label: "Job completed" },
   { value: "job.failed",      label: "Job failed" },
@@ -561,8 +560,7 @@ function WebhooksSection() {
   );
 }
 
-/* ─────────────────────────────── page ────────────────────────────── */
-
+//Page Contents
 export default function ApiKeysPage() {
   const [tab, setTab] = useState("keys");
 

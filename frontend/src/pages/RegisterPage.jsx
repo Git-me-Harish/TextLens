@@ -20,7 +20,7 @@ export default function RegisterPage() {
       toast.success("Account created!");
       navigate("/dashboard");
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Registration failed");
+      toast.error(errMsg(err, "Registration failed"));
     } finally {
       setLoading(false);
     }

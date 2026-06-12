@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, Fragment } from "react";
 import { Trash2, Download, ChevronLeft, ChevronRight, RotateCcw, AlertCircle } from "lucide-react";
 import toast from "react-hot-toast";
 import { formatDistanceToNow } from "date-fns";
-import api from "../lib/api";
+import api, { errMsg } from "../lib/api";
 import { Badge, Spinner } from "../components/ui";
 
 const STATUS_BADGE = { completed: "success", failed: "danger", processing: "processing", pending: "warning" };
@@ -76,7 +76,7 @@ export default function HistoryPage() {
       await api.post(`/jobs/${id}/retry`);
       toast.success("Job re-queued");
       setTimeout(() => load(page), 1500);
-    } catch (err) { toast.error(err.response?.data?.detail || "Retry failed"); }
+    } catch (err) { toast.error(errMsg(err, "Retry failed")); }
   };
 
   const toggleExpand = (id) => setExpandedId(prev => prev === id ? null : id);

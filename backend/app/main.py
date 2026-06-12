@@ -27,6 +27,7 @@ from app.api.routes.batch import router as batch_router
 from app.api.routes.apikeys import router as apikeys_router
 from app.api.routes.corrections import router as corrections_router
 from app.api.routes.chat import router as chat_router
+from app.api.routes.drive import router as drive_router
 
 logging.basicConfig(level=logging.INFO)
 
@@ -69,6 +70,7 @@ app.include_router(batch_router,       prefix="/api")
 app.include_router(apikeys_router,     prefix="/api")
 app.include_router(corrections_router, prefix="/api")
 app.include_router(chat_router,        prefix="/api")
+app.include_router(drive_router,       prefix="/api")
 
 
 # Health endpoints

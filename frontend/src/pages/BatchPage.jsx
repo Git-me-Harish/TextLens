@@ -6,7 +6,7 @@ import {
   FileText, AlertTriangle,
 } from "lucide-react";
 import toast from "react-hot-toast";
-import api from "../lib/api";
+import api, { errMsg } from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
 import { formatDistanceToNow } from "date-fns";
 
@@ -317,7 +317,7 @@ export default function BatchPage() {
       setBatchName("");
       setInstructions("");
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Failed to start batch");
+      toast.error(errMsg(err, "Failed to start batch"));
     } finally {
       setSubmitting(false);
     }
@@ -330,7 +330,7 @@ export default function BatchPage() {
       setBatches((prev) => prev.filter((b) => b.id !== id));
       toast.success("Batch deleted");
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Delete failed");
+      toast.error(errMsg(err, "Delete failed"));
     }
   };
 

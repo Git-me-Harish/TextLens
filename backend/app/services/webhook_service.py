@@ -1,13 +1,10 @@
 """
 Webhook delivery service.
 
-On any significant event, call dispatch_event().
-It finds all active webhooks for the user subscribed to that event,
-fires HTTPS POST with HMAC-SHA256 signed payload, logs the delivery.
-
-Retry policy: up to 3 attempts, exponential backoff (2s, 4s, 8s).
-Delivery is fire-and-forget from the caller's perspective —
-this runs as a background task and never blocks the main response.
+- Finds all active webhooks for a user matching the event type
+- Signs payload with HMAC-SHA256 if secret set
+- POSTs to target_url with retry (3 attempts, exponential backoff)
+- Logs every attempt to webhook_deliveries
 """
 import hashlib
 import hmac
@@ -18,123 +15,144 @@ from datetime import datetime
 from typing import Any
 
 import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.models import Webhook, WebhookDelivery, WebhookEvent
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 3
-_TIMEOUT_SECONDS = 10
+MAX_ATTEMPTS   = 3
+TIMEOUT_SECS   = 10
+BACKOFF_SECS   = [0, 2, 6]   # delay before each attempt
 
 
-def _sign_payload(secret: str, payload_bytes: bytes) -> str:
-    """HMAC-SHA256 signature — consumers verify via X-TextLens-Signature header."""
-    return "sha256=" + hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
+def _sign(payload_bytes: bytes, secret: str) -> str:
+    return "sha256=" + hmac.new(
+        secret.encode(), payload_bytes, hashlib.sha256
+    ).hexdigest()
 
 
-async def _deliver(
-    webhook_id: str,
-    target_url: str,
-    secret: str | None,
-    event: str,
-    payload: dict[str, Any],
-    attempt: int = 1,
-) -> bool:
-    """Attempt a single delivery. Returns True on 2xx, False otherwise."""
-    payload_bytes = json.dumps(payload, default=str).encode()
-    headers = {
-        "Content-Type": "application/json",
-        "X-TextLens-Event": event,
-        "X-TextLens-Attempt": str(attempt),
-        "User-Agent": "TextLens-Webhook/1.0",
-    }
-    if secret:
-        headers["X-TextLens-Signature"] = _sign_payload(secret, payload_bytes)
-
+async def _attempt(client: httpx.AsyncClient, url: str, payload_bytes: bytes, headers: dict) -> tuple[int | None, str | None]:
+    """Single HTTP POST attempt. Returns (status_code, error_message)."""
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-            response = await client.post(target_url, content=payload_bytes, headers=headers)
-            return 200 <= response.status_code < 300
+        resp = await client.post(url, content=payload_bytes, headers=headers, timeout=TIMEOUT_SECS)
+        return resp.status_code, None
     except Exception as exc:
-        logger.warning(f"[webhook:{webhook_id[:8]}] delivery failed attempt={attempt}: {exc}")
-        return False
+        return None, str(exc)
 
 
-async def dispatch_event(
+async def fire_webhook(
+    db: AsyncSession,
     user_id: str,
-    event: str,
+    event: WebhookEvent,
     payload: dict[str, Any],
 ) -> None:
     """
-    Find all active user webhooks subscribed to this event,
-    deliver to each with retry logic, log every attempt.
-
-    Called after job/agent/batch completion — always in a background task.
+    Find all active webhooks subscribed to `event` for `user_id` and deliver.
+    Called fire-and-forget — errors are logged, never raised.
     """
-    from app.db.database import AsyncSessionLocal
-    from app.models.models import Webhook, WebhookDelivery
-    from sqlalchemy import select
-
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
+    try:
+        res = await db.execute(
             select(Webhook).where(
                 Webhook.user_id == user_id,
                 Webhook.is_active == True,
             )
         )
-        webhooks = result.scalars().all()
+        webhooks = [w for w in res.scalars().all() if event.value in (w.events or [])]
 
-    # Filter to only webhooks subscribed to this event
-    subscribed = [w for w in webhooks if event in (w.events or [])]
-    if not subscribed:
+        if not webhooks:
+            return
+
+        payload_bytes = json.dumps({
+            "event": event.value,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "data": payload,
+        }, default=str).encode()
+
+        async with httpx.AsyncClient() as client:
+            for wh in webhooks:
+                await _deliver(client, db, wh, event, payload_bytes)
+
+    except Exception as exc:
+        logger.error(f"[webhook] fire_webhook crashed: {exc}", exc_info=True)
+
+
+async def _deliver(
+    client: httpx.AsyncClient,
+    db: AsyncSession,
+    wh: Webhook,
+    event: WebhookEvent,
+    payload_bytes: bytes,
+) -> None:
+    headers = {
+        "Content-Type": "application/json",
+        "X-TextLens-Event": event.value,
+        "User-Agent": "TextLens-Webhook/1.0",
+    }
+    if wh.secret:
+        headers["X-TextLens-Signature"] = _sign(payload_bytes, wh.secret)
+
+    status_code = None
+    error_msg   = None
+    success     = False
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        if BACKOFF_SECS[attempt - 1] > 0:
+            await asyncio.sleep(BACKOFF_SECS[attempt - 1])
+
+        status_code, error_msg = await _attempt(client, wh.target_url, payload_bytes, headers)
+        success = status_code is not None and 200 <= status_code < 300
+
+        logger.info(f"[webhook:{wh.id[:8]}] attempt={attempt} event={event.value} status={status_code} ok={success}")
+
+        if success:
+            break
+
+    # Log delivery attempt
+    delivery = WebhookDelivery(
+        webhook_id=wh.id,
+        event=event.value,
+        payload=json.loads(payload_bytes),
+        status_code=status_code,
+        success=success,
+        error_message=error_msg,
+        attempt=attempt,
+    )
+    db.add(delivery)
+
+    # Update webhook metadata
+    wh.last_triggered_at = datetime.utcnow()
+    wh.total_deliveries  = (wh.total_deliveries or 0) + 1
+    db.add(wh)
+
+    try:
+        await db.commit()
+    except Exception as exc:
+        logger.error(f"[webhook:{wh.id[:8]}] DB commit failed: {exc}")
+
+
+# ── Backward-compat alias used by batch_service ───────────────────────
+async def dispatch_event(
+    user_id: str,
+    event: str,
+    payload: dict,
+    db: "AsyncSession | None" = None,
+) -> None:
+    """
+    Thin wrapper around fire_webhook that accepts event as a plain string
+    and opens its own DB session when one isn't provided.
+    """
+    from app.db.database import AsyncSessionLocal
+
+    try:
+        event_enum = WebhookEvent(event)
+    except ValueError:
+        logger.warning(f"[webhook] unknown event type: {event!r} — skipping")
         return
 
-    full_payload = {
-        "event": event,
-        "timestamp": datetime.utcnow().isoformat(),
-        "data": payload,
-    }
-
-    for webhook in subscribed:
-        success = False
-        status_code = None
-        error_msg = None
-
-        for attempt in range(1, _MAX_RETRIES + 1):
-            ok = await _deliver(
-                webhook_id=webhook.id,
-                target_url=webhook.target_url,
-                secret=webhook.secret,
-                event=event,
-                payload=full_payload,
-                attempt=attempt,
-            )
-            if ok:
-                success = True
-                break
-            if attempt < _MAX_RETRIES:
-                await asyncio.sleep(2 ** attempt)  # 2s, 4s, 8s
-
-        # Log delivery attempt
-        async with AsyncSessionLocal() as db:
-            delivery = WebhookDelivery(
-                webhook_id=webhook.id,
-                event=event,
-                payload=full_payload,
-                status_code=status_code,
-                success=success,
-                error_message=error_msg,
-                attempt=_MAX_RETRIES if not success else 1,
-            )
-            db.add(delivery)
-
-            # Update webhook metadata
-            wh = await db.get(Webhook, webhook.id)
-            if wh:
-                wh.last_triggered_at = datetime.utcnow()
-                wh.total_deliveries += 1
-
-            await db.commit()
-
-        logger.info(
-            f"[webhook:{webhook.id[:8]}] event={event} "
-            f"url={webhook.target_url} success={success}"
-        )
+    if db is not None:
+        await fire_webhook(db, user_id, event_enum, payload)
+    else:
+        async with AsyncSessionLocal() as session:
+            await fire_webhook(session, user_id, event_enum, payload)

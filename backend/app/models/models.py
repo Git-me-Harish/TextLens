@@ -18,8 +18,7 @@ import enum
 from app.db.database import Base
 
 
-# ──────────────────────────────── enums ────────────────────────────────
-
+# Enums 
 class UserRole(str, enum.Enum):
     admin = "admin"
     user  = "user"
@@ -74,8 +73,7 @@ class WebhookEvent(str, enum.Enum):
     batch_completed   = "batch.completed"
 
 
-# ──────────────────────────────── core entities ────────────────────────
-
+# Core entities
 class User(Base):
     __tablename__ = "users"
 
@@ -114,6 +112,7 @@ class OCRJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     processing_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # SHA-256 hex
     # batch linkage — null for standalone jobs
     batch_item_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("batch_items.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -151,8 +150,7 @@ class AgentRun(Base):
     api_key: Mapped["APIKey | None"] = relationship("APIKey", back_populates="agent_runs")
 
 
-# ──────────────────────────────── batch ────────────────────────────────
-
+# Batch processing entities — for when users upload multiple files together and want aggregate tracking and results
 class BatchJob(Base):
     """One batch = multiple files processed with the same pipeline."""
     __tablename__ = "batch_jobs"
@@ -191,8 +189,7 @@ class BatchItem(Base):
     ocr_job: Mapped["OCRJob | None"] = relationship("OCRJob", back_populates="batch_item")
 
 
-# ──────────────────────────────── API keys ─────────────────────────────
-
+# API keys
 class APIKey(Base):
     """
     Enterprise API key — scoped to a user, stores hashed key.
@@ -216,8 +213,7 @@ class APIKey(Base):
     agent_runs: Mapped[list["AgentRun"]] = relationship("AgentRun", back_populates="api_key")
 
 
-# ──────────────────────────────── webhooks ─────────────────────────────
-
+# Webhooks
 class Webhook(Base):
     """
     User-registered webhook endpoint.
@@ -257,8 +253,7 @@ class WebhookDelivery(Base):
     webhook: Mapped["Webhook"] = relationship("Webhook", back_populates="deliveries")
 
 
-# ──────────────────────────────── audit ────────────────────────────────
-
+# Audit
 class AuditLog(Base):
     """
     Immutable processing trail.
@@ -279,8 +274,7 @@ class AuditLog(Base):
     user: Mapped["User"] = relationship("User", back_populates="audit_logs")
 
 
-# ──────────────────────────────── corrections ──────────────────────────
-
+# Corrections 
 class FieldCorrection(Base):
     """
     Human correction on an agent result field.

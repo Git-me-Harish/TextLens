@@ -64,6 +64,20 @@ async def _process_and_save(job_id: str, job_type: str, file_path: str, extra: d
                 job.completed_at = datetime.utcnow()
                 await db.commit()
                 logger.info(f"[job:{job_id[:8]}] saved status={job.status.value}")
+
+                # Fire webhook — non-blocking, errors swallowed inside service
+                from app.services.webhook_service import fire_webhook
+                from app.models.models import WebhookEvent
+                event = WebhookEvent.job_failed if result.get("error") else WebhookEvent.job_completed
+                asyncio.ensure_future(fire_webhook(db, job.user_id, event, {
+                    "job_id": job.id,
+                    "job_type": job.job_type.value,
+                    "status": job.status.value,
+                    "original_filename": job.original_filename,
+                    "page_count": job.page_count,
+                    "processing_time_ms": job.processing_time_ms,
+                    "error_message": job.error_message,
+                }))
     except Exception as db_exc:
         logger.error(f"[job:{job_id[:8]}] DB write failed: {db_exc}", exc_info=True)
 

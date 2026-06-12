@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { formatDistanceToNow, format } from "date-fns";
-import api from "../lib/api";
+import api, { errMsg } from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
 
 /* ─────────────────────────────── API Keys ────────────────────────── */
@@ -40,7 +40,7 @@ function NewKeyModal({ catalog, onClose, onCreate }) {
       });
       onCreate(data);
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Failed to create key");
+      toast.error(errMsg(err, "Failed to create key"));
     } finally {
       setLoading(false);
     }
@@ -347,7 +347,7 @@ function NewWebhookModal({ onClose, onCreate }) {
       });
       onCreate(data);
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Failed to create webhook");
+      toast.error(errMsg(err, "Failed to create webhook"));
     } finally {
       setLoading(false);
     }

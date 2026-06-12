@@ -1,10 +1,170 @@
 import { useState, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, ChevronRight, RotateCcw, Download, Copy, Check, AlertTriangle, FileSpreadsheet } from "lucide-react";
+import { Upload, ChevronRight, RotateCcw, Download, Copy, Check, AlertTriangle, FileSpreadsheet, Pencil, Sparkles, X } from "lucide-react";
 import toast from "react-hot-toast";
-import api from "../lib/api";
+import api, { errMsg } from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
 import { useAgent } from "../lib/AgentContext";
+import DrivePickerModal from "../components/DrivePickerModal";
+
+// Auto-classifier suggestion banner
+function ClassifierBanner({ result, catalog, onAccept, onDismiss }) {
+  if (!result) return null;
+  const domainMeta = catalog?.[result.detected_domain];
+  const pipelineMeta = domainMeta?.pipelines?.[result.detected_pipeline];
+  if (!domainMeta || !pipelineMeta) return null;
+  const conf = result.confidence || 0;
+  const confColor = conf >= 80 ? "var(--success)" : conf >= 50 ? "var(--warning)" : "var(--danger)";
+
+  return (
+    <div style={{ background: "var(--paper-2,#f0f4ff)", border: "1px solid var(--accent)", borderRadius: 10, padding: "0.875rem 1.1rem", marginBottom: "1.25rem", display: "flex", alignItems: "flex-start", gap: 10 }}>
+      <Sparkles size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 2 }} />
+      <div style={{ flex: 1 }}>
+        <div style={{ fontWeight: 600, fontSize: "0.875rem", color: "var(--ink)", marginBottom: 3 }}>
+          Auto-detected: {domainMeta.label} → {pipelineMeta.label}
+        </div>
+        <div style={{ fontSize: "0.78rem", color: "var(--ink-muted)", marginBottom: 8 }}>
+          {result.reasoning} &nbsp;
+          <span style={{ fontWeight: 600, color: confColor }}>{conf}% confidence</span>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onAccept} style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.85rem", cursor: "pointer", fontSize: "0.8rem", fontWeight: 600 }}>
+            Use this pipeline
+          </button>
+          <button onClick={onDismiss} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.8rem", color: "var(--ink-muted)" }}>
+            Choose manually
+          </button>
+        </div>
+      </div>
+      <button onClick={onDismiss} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-muted)", padding: 2, flexShrink: 0 }}>
+        <X size={14} />
+      </button>
+    </div>
+  );
+}
+
+// Editable structured result
+function EditableStructuredResult({ data, runId, depth = 0 }) {
+  const [editing, setEditing] = useState(null); // "field.path"
+  const [editVal, setEditVal] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [corrections, setCorrections] = useState({});
+
+  const saveCorrection = async (fieldPath) => {
+    setSaving(true);
+    try {
+      await api.post(`/agents/${runId}/corrections`, {
+        corrections: [{ field_path: fieldPath, corrected_value: editVal }],
+      });
+      setCorrections(prev => ({ ...prev, [fieldPath]: editVal }));
+      toast.success("Correction saved");
+      setEditing(null);
+    } catch (err) {
+      toast.error(errMsg(err, "Failed to save correction"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const renderValue = (value, path) => {
+    const corrected = corrections[path];
+    const displayVal = corrected !== undefined ? corrected : value;
+
+    if (displayVal === null || displayVal === undefined)
+      return <span style={{ color: "var(--ink-muted)", fontStyle: "italic" }}>—</span>;
+    if (typeof displayVal === "boolean")
+      return <span style={{ color: "var(--accent)", fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{displayVal ? "true" : "false"}</span>;
+    if (typeof displayVal === "object")
+      return <EditableStructuredResult data={displayVal} runId={runId} depth={depth + 1} />;
+
+    const isEditing = editing === path;
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+        {isEditing ? (
+          <>
+            <input
+              autoFocus
+              value={editVal}
+              onChange={e => setEditVal(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") saveCorrection(path); if (e.key === "Escape") setEditing(null); }}
+              style={{ flex: 1, border: "1px solid var(--accent)", borderRadius: 5, padding: "2px 8px", fontSize: "0.83rem", outline: "none", fontFamily: "inherit" }}
+            />
+            <button onClick={() => saveCorrection(path)} disabled={saving} style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 5, padding: "2px 8px", cursor: "pointer", fontSize: "0.75rem" }}>
+              {saving ? "…" : "Save"}
+            </button>
+            <button onClick={() => setEditing(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-muted)" }}><X size={12} /></button>
+          </>
+        ) : (
+          <>
+            <span style={{ color: corrected !== undefined ? "var(--accent)" : "var(--ink-secondary)", fontSize: "0.875rem" }}>
+              {String(displayVal)}
+              {corrected !== undefined && <span style={{ fontSize: "0.7rem", color: "var(--accent)", marginLeft: 5 }}>✎ corrected</span>}
+            </span>
+            {runId && (
+              <button onClick={() => { setEditing(path); setEditVal(String(displayVal)); }}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-muted)", padding: 2, opacity: 0, transition: "opacity 0.15s" }}
+                className="edit-btn"
+                title="Edit this field"
+              >
+                <Pencil size={11} />
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  if (data === null || data === undefined) return <span style={{ color: "var(--ink-muted)", fontStyle: "italic" }}>—</span>;
+  if (typeof data === "boolean") return <span style={{ color: "var(--accent)", fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{data ? "true" : "false"}</span>;
+
+  if (Array.isArray(data)) {
+    if (data.length === 0) return <span style={{ color: "var(--ink-muted)", fontStyle: "italic" }}>None</span>;
+    if (typeof data[0] === "string") {
+      return (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
+          {data.map((item, i) => <span key={i} style={{ background: "var(--paper-2)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 8px", fontSize: "0.78rem", color: "var(--ink-secondary)" }}>{item}</span>)}
+        </div>
+      );
+    }
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+        {data.map((item, i) => (
+          <div key={i} style={{ background: "var(--paper)", border: "1px solid var(--border)", borderRadius: 8, padding: "0.75rem" }}>
+            <EditableStructuredResult data={item} runId={runId} depth={depth + 1} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (data.severity && data.issue) {
+    return (
+      <div className={`risk-flag ${data.severity}`}>
+        <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+        <div>
+          <div style={{ fontWeight: 700, fontSize: "0.72rem" }}>{data.severity.toUpperCase()}</div>
+          <div style={{ fontSize: "0.82rem" }}>{data.issue}</div>
+          {data.clause && <div style={{ fontSize: "0.75rem", opacity: 0.75, marginTop: 2 }}>{data.clause}</div>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="result-field-grid" style={{ "--edit-btn-opacity": 0 }}>
+      <style>{`.result-field:hover .edit-btn { opacity: 1 !important; }`}</style>
+      {Object.entries(data).map(([key, value]) => (
+        <div key={key} className="result-field">
+          <span className="result-field-key">{key.replace(/_/g, " ")}</span>
+          <div className="result-field-value" style={{ fontFamily: "inherit" }}>
+            {renderValue(value, key)}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function Steps({ current }) {
   const steps = ["Extract", "Choose Pipeline", "Run Agent", "Results"];
@@ -108,6 +268,9 @@ export default function PipelinesPage() {
   const [polling, setPolling] = useState(false);
   const [activeTab, setActiveTab] = useState("structured");
   const [copied, setCopied] = useState(false);
+  const [classifying, setClassifying] = useState(false);
+  const [classifierResult, setClassifierResult] = useState(null);
+  const [driveOpen, setDriveOpen] = useState(false);
 
   useEffect(() => { api.get("/agents/catalog").then(r => setCatalog(r.data)); }, []);
 
@@ -141,10 +304,35 @@ export default function PipelinesPage() {
         job = res.data;
         if (job.status === "completed" || job.status === "failed") break;
       }
-      if (job.status === "completed") { setOcrJob(job); setStep(1); toast.success("Text extracted — choose a pipeline"); }
+      if (job.status === "completed") {
+        setOcrJob(job);
+        setStep(1);
+        toast.success("Text extracted — detecting best pipeline…");
+        // Auto-classify in background
+        setClassifying(true);
+        api.post("/agents/classify", { job_id: job.id })
+          .then(r => setClassifierResult(r.data))
+          .catch(() => {})
+          .finally(() => setClassifying(false));
+      }
       else toast.error(job.error_message || "Extraction failed");
-    } catch (err) { toast.error(err.response?.data?.detail || "Upload failed"); }
-    finally { setUploading(false); }
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      if (err.response?.status === 409 && detail?.code === "duplicate_file") {
+        toast((t) => (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>Already processed</div>
+            <div style={{ fontSize: "0.8rem", color: "#666" }}><strong>{detail.original_filename}</strong> already in your history.</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={async () => { toast.dismiss(t.id); const { data } = await api.get(`/jobs/${detail.existing_job_id}`); setOcrJob(data); setStep(1); }} style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem" }}>Use existing</button>
+              <button onClick={() => toast.dismiss(t.id)} style={{ background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem" }}>Dismiss</button>
+            </div>
+          </div>
+        ), { duration: 10000 });
+      } else {
+        toast.error(typeof detail === "string" ? detail : "Upload failed");
+      }
+    } finally { setUploading(false); }
   };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -160,11 +348,11 @@ export default function PipelinesPage() {
       const { data } = await api.post("/agents/run", { job_id: ocrJob.id, domain: selectedDomain, pipeline_type: selectedPipeline, user_instructions: instructions });
       setAgentRun(data);
       startAgent(selectedDomain, selectedPipeline, catalog[selectedDomain]?.pipelines[selectedPipeline]?.label);
-    } catch (err) { toast.error(err.response?.data?.detail || "Failed to start agent"); setStep(1); }
+    } catch (err) { toast.error(errMsg(err, "Failed to start agent")); setStep(1); }
     finally { setRunning(false); }
   };
 
-  const reset = () => { setStep(0); setOcrJob(null); setSelectedDomain(null); setSelectedPipeline(null); setAgentRun(null); setInstructions(""); clearAgent(); };
+  const reset = () => { setStep(0); setOcrJob(null); setSelectedDomain(null); setSelectedPipeline(null); setAgentRun(null); setInstructions(""); setClassifierResult(null); clearAgent(); };
 
   const copyJSON = () => {
     navigator.clipboard.writeText(JSON.stringify(agentRun?.structured_result, null, 2));
@@ -185,7 +373,6 @@ export default function PipelinesPage() {
 
       <Steps current={step} />
 
-      {/* Step 0 — Upload */}
       {step === 0 && (
         <div className="card" style={{ padding: "1.5rem" }}>
           <h2 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "1rem" }}>Upload your document</h2>
@@ -199,11 +386,51 @@ export default function PipelinesPage() {
               <div className="dropzone-sub">PDF, JPG, PNG, TIFF — max 50MB</div></>
             )}
           </div>
+          {/* Drive import */}
+          <div style={{ textAlign: "center", marginTop: "1rem" }}>
+            <span style={{ fontSize: "0.78rem", color: "var(--ink-muted)" }}>or </span>
+            <button onClick={() => setDriveOpen(true)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent)", fontSize: "0.82rem", fontWeight: 600, padding: 0, textDecoration: "underline" }}>
+              import from Google Drive
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Step 1 — Choose */}
+      <DrivePickerModal
+        isOpen={driveOpen}
+        onClose={() => setDriveOpen(false)}
+        jobType="pdf_extract"
+        onImport={(job) => {
+          setOcrJob(job);
+          setStep(1);
+          toast.success("Importing from Drive — detecting pipeline…");
+          setClassifying(true);
+          api.post("/agents/classify", { job_id: job.id })
+            .then(r => setClassifierResult(r.data))
+            .catch(() => {})
+            .finally(() => setClassifying(false));
+        }}/>
+
       {step === 1 && (
+        <div>
+          {classifying && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0.75rem 1rem", background: "var(--paper-2)", borderRadius: 10, marginBottom: "1.25rem", border: "1px solid var(--border)", fontSize: "0.82rem", color: "var(--ink-muted)" }}>
+              <Spinner size={14} /> Detecting best pipeline for this document…
+            </div>
+          )}
+          {!classifying && classifierResult && (
+            <ClassifierBanner
+              result={classifierResult}
+              catalog={catalog}
+              onAccept={() => {
+                setSelectedDomain(classifierResult.detected_domain);
+                setSelectedPipeline(classifierResult.detected_pipeline);
+                setClassifierResult(null);
+                toast.success("Pipeline pre-selected — review and run");
+              }}
+              onDismiss={() => setClassifierResult(null)}
+            />
+          )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem" }}>
           <div className="card" style={{ padding: "1.5rem" }}>
             <h2 style={{ fontSize: "0.95rem", fontWeight: 600, marginBottom: "1rem" }}>Select domain</h2>
@@ -250,9 +477,9 @@ export default function PipelinesPage() {
             )}
           </div>
         </div>
+        </div>
       )}
 
-      {/* Step 2 — Running */}
       {step === 2 && (
         <div className="card" style={{ padding: "3rem", textAlign: "center" }}>
           <Spinner size={36} />
@@ -263,7 +490,6 @@ export default function PipelinesPage() {
         </div>
       )}
 
-      {/* Step 3 — Results */}
       {step === 3 && agentRun && agentRun.status !== "failed" && (
         <div>
           <div className="card" style={{ padding: "1.25rem 1.5rem", marginBottom: "1.25rem", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
@@ -283,6 +509,14 @@ export default function PipelinesPage() {
               </button>
               <button onClick={() => window.open(`/api/export/agent/${agentRun.id}/excel`, "_blank")} className="btn btn-primary btn-sm">
                 <FileSpreadsheet size={14} /> Excel
+              </button>
+              <button onClick={async () => {
+                try {
+                  await api.post(`/drive/export/${agentRun.id}`, { folder_id: "root" });
+                  toast.success("Saved to Google Drive");
+                } catch (err) { toast.error(errMsg(err, "Drive export failed")); }
+              }} className="btn btn-outline btn-sm">
+                ☁ Save to Drive
               </button>
             </div>
           </div>
@@ -306,7 +540,7 @@ export default function PipelinesPage() {
               </div>
             </div>
             <div style={{ padding: "1.5rem" }}>
-              {activeTab === "structured" && agentRun.structured_result && <StructuredResult data={agentRun.structured_result} />}
+              {activeTab === "structured" && agentRun.structured_result && <EditableStructuredResult data={agentRun.structured_result} runId={agentRun.id} />}
               {activeTab === "raw" && <div className="result-raw">{JSON.stringify(agentRun.structured_result, null, 2)}</div>}
               {activeTab === "source" && <div className="result-raw">{agentRun.input_text || "Source text preview not available"}</div>}
             </div>

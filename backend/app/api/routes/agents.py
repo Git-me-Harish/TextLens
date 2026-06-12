@@ -8,7 +8,7 @@ from app.api.deps import get_current_user
 from app.db.database import get_db
 from app.models.models import User, OCRJob, AgentRun, AgentStatus
 from app.schemas.schemas import AgentRunRequest, AgentRunOut, AgentRunListResponse
-from app.services.agent_service import run_agent, get_pipeline_catalog
+from app.services.agent_service import run_agent, get_pipeline_catalog, classify_document
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -28,10 +28,46 @@ async def execute_agent_run(run_id: str, domain: str, pipeline_type: str, extrac
             run.completed_at = datetime.utcnow()
             await db.commit()
 
+            # Fire webhook
+            from app.services.webhook_service import fire_webhook
+            from app.models.models import WebhookEvent
+            import asyncio
+            event = WebhookEvent.agent_completed
+            asyncio.ensure_future(fire_webhook(db, run.user_id, event, {
+                "run_id": run.id,
+                "domain": run.domain,
+                "pipeline_type": run.pipeline_type,
+                "status": run.status.value,
+                "original_filename": run.original_filename,
+                "confidence_score": run.confidence_score,
+                "processing_time_ms": run.processing_time_ms,
+                "error_message": run.error_message,
+            }))
+
 
 @router.get("/catalog")
 async def get_catalog():
     return get_pipeline_catalog()
+
+
+@router.post("/classify")
+async def classify_job(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Auto-detect domain + pipeline from an already-extracted OCRJob."""
+    job_id = data.get("job_id")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id required")
+    res = await db.execute(select(OCRJob).where(OCRJob.id == job_id, OCRJob.user_id == user.id))
+    job = res.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.result_text:
+        raise HTTPException(status_code=400, detail="Job has no extracted text to classify")
+    result = await classify_document(job.result_text)
+    return result
 
 
 @router.post("/run", response_model=AgentRunOut, status_code=202)

@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
 import { Upload, Download, Copy, Check } from "lucide-react";
 import toast from "react-hot-toast";
-import api from "../../lib/api";
+import api, { errMsg } from "../../lib/api";
 import { Button, Badge, Spinner } from "../ui";
 
 const STATUS_BADGE = { completed: "success", failed: "danger", processing: "processing", pending: "warning" };
@@ -48,7 +48,36 @@ export default function OCRTool({ title, desc, jobType, acceptedTypes, acceptLab
       setJob(data);
       toast("File uploaded, processing...", { icon: "..." });
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Upload failed");
+      const detail = err.response?.data?.detail;
+      if (err.response?.status === 409 && detail?.code === "duplicate_file") {
+        toast((t) => (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>Already processed</div>
+            <div style={{ fontSize: "0.8rem", color: "#666" }}>
+              <strong>{detail.original_filename}</strong> already in your history.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={async () => {
+                  toast.dismiss(t.id);
+                  try {
+                    const { data: existing } = await api.get(`/jobs/${detail.existing_job_id}`);
+                    setJob(existing);
+                  } catch { toast.error("Failed to load existing job"); }
+                }}
+                style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem" }}
+              >
+                Use existing
+              </button>
+              <button onClick={() => toast.dismiss(t.id)} style={{ background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem" }}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ), { duration: 10000 });
+      } else {
+        toast.error(errMsg(err, "Upload failed"));
+      }
     } finally {
       setUploading(false);
     }
@@ -92,7 +121,6 @@ export default function OCRTool({ title, desc, jobType, acceptedTypes, acceptLab
         </div>
       </div>
 
-      {/* Extra controls passed from parent */}
       {children && job && (
         <div className="card" style={{ padding: "1.5rem", marginBottom: "1.5rem" }}>
           {children({ job, setJob })}

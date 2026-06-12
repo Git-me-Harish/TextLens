@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import { Send, FileText, RotateCcw, Bot, User as UserIcon, Copy, Check, History } from "lucide-react";
 import toast from "react-hot-toast";
-import api from "../lib/api";
+import api, { errMsg } from "../lib/api";
 import { Button, Spinner } from "../components/ui";
 
 /* ─── Inline markdown renderer ──────────────────────────────────────── */
@@ -192,7 +192,47 @@ export default function PDFChatPage() {
       toast.success("Document ready");
       setTimeout(() => inputRef.current?.focus(), 100);
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Upload failed");
+      const detail = err.response?.data?.detail;
+      if (err.response?.status === 409 && detail?.code === "duplicate_file") {
+        // File already processed — offer to open existing job directly
+        toast((t) => (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>Already processed</div>
+            <div style={{ fontSize: "0.8rem", color: "#666" }}>
+              <strong>{detail.original_filename}</strong> was uploaded before.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={async () => {
+                  toast.dismiss(t.id);
+                  setUploading(true);
+                  try {
+                    const { data: sess } = await api.post("/chat/sessions", { job_id: detail.existing_job_id });
+                    const { data: job } = await api.get(`/jobs/${detail.existing_job_id}`);
+                    setSession({ id: sess.session_id, title: sess.title, job_id: detail.existing_job_id, suggested_questions: sess.suggested_questions });
+                    setMessages([{ role: "system", content: `Loaded: ${detail.original_filename}` }]);
+                  } catch {
+                    toast.error("Failed to load existing document");
+                  } finally {
+                    setUploading(false);
+                  }
+                }}
+                style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem" }}
+              >
+                Open existing
+              </button>
+              <button
+                onClick={() => toast.dismiss(t.id)}
+                style={{ background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem" }}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ), { duration: 10000 });
+      } else {
+        toast.error(typeof detail === "string" ? detail : "Upload failed");
+      }
     } finally {
       setUploading(false);
     }
@@ -211,7 +251,7 @@ export default function PDFChatPage() {
       setMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
     } catch (err) {
       const detail = err.response?.data?.detail || "Something went wrong";
-      toast.error(detail);
+      toast.error(errMsg(err, "Operation failed"));
       setMessages(prev => [...prev, { role: "assistant", content: `**Error:** ${detail}` }]);
     } finally {
       setAsking(false);

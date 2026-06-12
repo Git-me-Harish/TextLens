@@ -35,3 +35,13 @@ api.interceptors.response.use(
 );
 
 export default api;
+
+
+export function errMsg(err, fallback = "Something went wrong") {
+  const detail = err?.response?.data?.detail;
+  if (!detail) return fallback;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map(d => d.msg || JSON.stringify(d)).join(", ");
+  if (typeof detail === "object" && detail.message) return detail.message;
+  return fallback;
+}

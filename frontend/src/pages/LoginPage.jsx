@@ -4,7 +4,7 @@ import { useForm } from "react-hook-form";
 import toast from "react-hot-toast";
 import { useAuth } from "../lib/AuthContext";
 import { Input, Button } from "../components/ui";
-import api from "../lib/api";
+import api, { errMsg } from "../lib/api";
 
 const LOGOS = ["Anthropic", "LangChain", "Tesseract", "FastAPI", "HuggingFace", "LangGraph"];
 
@@ -20,7 +20,7 @@ export default function LoginPage() {
       await login(data.email, data.password);
       navigate("/dashboard");
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Login failed");
+      toast.error(errMsg(err, "Login failed"));
     } finally {
       setLoading(false);
     }

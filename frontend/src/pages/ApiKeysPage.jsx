@@ -9,8 +9,7 @@ import { formatDistanceToNow, format } from "date-fns";
 import api, { errMsg } from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
 
-/* ─────────────────────────────── API Keys ────────────────────────── */
-
+// API Keys 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {

@@ -22,7 +22,7 @@ const DOMAIN_META = {
   general:    { label: "General",     icon: FileText,      color: "#64748b" },
 };
 
-/* ── 7-day activity bar chart ────────────────────────────────────── */
+// 7-day activity bar chart
 function ActivityChart({ jobs }) {
   const days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() - (6 - i)); return d.toDateString();
@@ -47,7 +47,7 @@ function ActivityChart({ jobs }) {
   );
 }
 
-/* ── Domain usage breakdown ──────────────────────────────────────── */
+// Domain usage breakdown
 function DomainBreakdown({ runs }) {
   if (!runs.length) return (
     <div style={{ textAlign: "center", color: "var(--ink-muted)", fontSize: "0.83rem", padding: "1.5rem 0" }}>
@@ -84,7 +84,7 @@ function DomainBreakdown({ runs }) {
   );
 }
 
-/* ── Quick action card ───────────────────────────────────────────── */
+// Quick action cards
 function QuickAction({ to, icon: Icon, label, desc, accent }) {
   return (
     <Link to={to} style={{ textDecoration: "none" }}>
@@ -104,7 +104,7 @@ function QuickAction({ to, icon: Icon, label, desc, accent }) {
   );
 }
 
-/* ── Main dashboard ──────────────────────────────────────────────── */
+// Main dashboard
 export default function DashboardPage() {
   const { user } = useAuth();
   const [stats, setStats] = useState(null);
@@ -133,15 +133,12 @@ export default function DashboardPage() {
 
   return (
     <div>
-      {/* Header */}
       <div className="page-header" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 className="page-title">{user?.full_name?.split(" ")[0]}'s workspace</h1>
           <p className="page-subtitle">Document intelligence command center</p>
         </div>
       </div>
-
-      {/* Stats row */}
       {loading ? (
         <div className="stats-row" style={{ marginBottom: "1.75rem" }}>
           {[1,2,3,4].map(i => <div key={i} className="stat-card skeleton" style={{ height: 88 }} />)}
@@ -168,8 +165,6 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
-
-      {/* Quick actions */}
       <div style={{ marginBottom: "1.75rem" }}>
         <div style={{ fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--ink-muted)", marginBottom: "0.75rem" }}>Quick actions</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: "0.75rem" }}>
@@ -179,8 +174,6 @@ export default function DashboardPage() {
           <QuickAction to="/batch" icon={Layers} label="Batch Jobs" desc="Process multiple types of files" accent="#d97706" />
         </div>
       </div>
-
-      {/* Two-column: activity + domain breakdown */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem", marginBottom: "1.5rem" }}>
         <div className="card" style={{ padding: "1.25rem" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: "1.25rem" }}>
@@ -198,10 +191,7 @@ export default function DashboardPage() {
           {loading ? <div className="skeleton" style={{ height: 80 }} /> : <DomainBreakdown runs={recentAgents} />}
         </div>
       </div>
-
-      {/* Two-column: recent extractions + recent agent runs */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem" }}>
-        {/* Recent extractions */}
         <div className="card" style={{ overflow: "hidden" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)" }}>
             <span style={{ fontWeight: 600, fontSize: "0.875rem" }}>Recent extractions</span>
@@ -231,8 +221,6 @@ export default function DashboardPage() {
             </table>
           )}
         </div>
-
-        {/* Recent agent runs */}
         <div className="card" style={{ overflow: "hidden" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

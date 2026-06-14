@@ -21,8 +21,7 @@ from app.schemas.schemas import (
 router = APIRouter(tags=["corrections"])
 
 
-# ──────────────────────────────── corrections ──────────────────────────
-
+# Corrections
 @router.post("/agents/{run_id}/corrections", response_model=list[FieldCorrectionOut], status_code=201)
 async def submit_corrections(
     run_id: str,
@@ -109,8 +108,7 @@ async def get_corrections(
     return result.scalars().all()
 
 
-# ──────────────────────────────── audit log ────────────────────────────
-
+# Audit log 
 @router.get("/audit", response_model=AuditLogListResponse)
 async def get_audit_log(
     page: int = 1,
@@ -139,8 +137,7 @@ async def get_audit_log(
     return AuditLogListResponse(logs=list(logs), total=total, page=page, per_page=per_page)
 
 
-# ──────────────────────────────── helper ───────────────────────────────
-
+# Helper
 def _get_nested(obj: dict, path: str):
     """
     Traverse a dot-notation path through a nested dict/list.

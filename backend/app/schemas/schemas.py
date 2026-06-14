@@ -8,8 +8,7 @@ from datetime import datetime
 from app.models.models import UserRole, JobType, JobStatus, AgentStatus, AgentDomain, BatchStatus
 
 
-# ──────────────────────────────── auth ─────────────────────────────────
-
+# Auth
 class UserRegister(BaseModel):
     email: EmailStr
     full_name: str
@@ -54,8 +53,7 @@ class ResetPasswordRequest(BaseModel):
         return v
 
 
-# ──────────────────────────────── user ─────────────────────────────────
-
+# User
 class UserOut(BaseModel):
     id: str
     email: str
@@ -74,8 +72,7 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
 
 
-# ──────────────────────────────── jobs ─────────────────────────────────
-
+# Jobs
 class JobOut(BaseModel):
     id: str
     job_type: JobType
@@ -105,8 +102,7 @@ class QuestionRequest(BaseModel):
     job_id: str
 
 
-# ──────────────────────────────── agents ───────────────────────────────
-
+# Agents
 class AgentRunRequest(BaseModel):
     job_id: str
     domain: str
@@ -139,8 +135,7 @@ class AgentRunListResponse(BaseModel):
     per_page: int
 
 
-# ──────────────────────────────── corrections ──────────────────────────
-
+# Corrections
 class FieldCorrectionCreate(BaseModel):
     """Submit one or more field corrections for an agent result."""
     corrections: List[dict]   # [{field_path: str, corrected_value: str}]
@@ -158,8 +153,7 @@ class FieldCorrectionOut(BaseModel):
         from_attributes = True
 
 
-# ──────────────────────────────── batch ────────────────────────────────
-
+# Batch
 class BatchJobCreate(BaseModel):
     name: Optional[str] = "Batch Job"
     domain: str
@@ -204,8 +198,7 @@ class BatchJobListResponse(BaseModel):
     per_page: int
 
 
-# ──────────────────────────────── API keys ─────────────────────────────
-
+# API keys
 class APIKeyCreate(BaseModel):
     name: str
     monthly_limit: Optional[int] = None
@@ -235,8 +228,7 @@ class APIKeyListResponse(BaseModel):
     total: int
 
 
-# ──────────────────────────────── webhooks ─────────────────────────────
-
+# Webhooks
 class WebhookCreate(BaseModel):
     name: str
     target_url: str
@@ -271,8 +263,7 @@ class WebhookDeliveryOut(BaseModel):
         from_attributes = True
 
 
-# ──────────────────────────────── audit ────────────────────────────────
-
+# Audit
 class AuditLogOut(BaseModel):
     id: str
     action: str

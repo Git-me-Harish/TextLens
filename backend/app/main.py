@@ -12,8 +12,6 @@ from app.core.config import settings
 from app.db.database import engine, Base
 from app.db.redis import close_redis
 from app.api.routes import auth, jobs, users, agents, export
-
-# Phase 2 routers
 from app.api.routes.batch import router as batch_router
 from app.api.routes.apikeys import router as apikeys_router
 from app.api.routes.corrections import router as corrections_router

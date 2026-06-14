@@ -1,13 +1,4 @@
-"""
-TextLens FastAPI application — Phase 2.
-
-New routers registered:
-  /api/batch      — bulk file processing
-  /api/keys       — API key management
-  /api/webhooks   — webhook endpoints
-  /api/agents/{id}/corrections — field correction loop
-  /api/audit      — immutable processing trail
-"""
+""" TextLens FastAPI application """
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -58,14 +49,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Existing routers
+# Routers
 app.include_router(auth.router,    prefix="/api")
 app.include_router(jobs.router,    prefix="/api")
 app.include_router(users.router,   prefix="/api")
 app.include_router(agents.router,  prefix="/api")
 app.include_router(export.router,  prefix="/api")
-
-# Phase 2 routers 
 app.include_router(batch_router,       prefix="/api")
 app.include_router(apikeys_router,     prefix="/api")
 app.include_router(corrections_router, prefix="/api")
@@ -74,7 +63,6 @@ app.include_router(drive_router,       prefix="/api")
 
 
 # Health endpoints
-
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "3.0.0"}

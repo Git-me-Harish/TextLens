@@ -9,8 +9,7 @@ import { formatDistanceToNow, format } from "date-fns";
 import api, { errMsg } from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
 
-/* ─────────────────────────────── API Keys ────────────────────────── */
-
+// API Keys 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
@@ -313,8 +312,7 @@ print(response.json())`}
   );
 }
 
-/* ─────────────────────────────── Webhooks ────────────────────────── */
-
+//Webhooks:
 const ALL_EVENTS = [
   { value: "job.completed",   label: "Job completed" },
   { value: "job.failed",      label: "Job failed" },
@@ -562,8 +560,7 @@ function WebhooksSection() {
   );
 }
 
-/* ─────────────────────────────── page ────────────────────────────── */
-
+//Page Contents
 export default function ApiKeysPage() {
   const [tab, setTab] = useState("keys");
 

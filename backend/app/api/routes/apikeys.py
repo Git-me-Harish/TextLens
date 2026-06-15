@@ -61,8 +61,7 @@ def verify_api_key(plain_key: str, key_hash: str) -> bool:
         return False
 
 
-# ──────────────────────────────── API Keys ─────────────────────────────
-
+# API Keys 
 @router.post("/keys", response_model=APIKeyOut, status_code=201)
 async def create_api_key(
     data: APIKeyCreate,
@@ -171,8 +170,7 @@ async def revoke_api_key(
     logger.info(f"[api_key] user={user.id[:8]} revoked key={key.key_prefix}…")
 
 
-# ──────────────────────────────── Webhooks ─────────────────────────────
-
+# Webhooks
 VALID_EVENTS = {e.value for e in WebhookEvent}
 
 

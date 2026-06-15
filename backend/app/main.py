@@ -1,5 +1,6 @@
 # TextLens FastAPI application:
 
+""" TextLens FastAPI application """
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -64,7 +65,6 @@ app.include_router(schedules_router,   prefix="/api")
 
 
 # Health endpoints
-
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "3.0.0"}

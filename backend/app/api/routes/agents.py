@@ -15,8 +15,8 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 async def execute_agent_run(run_id: str, domain: str, pipeline_type: str, extracted_text: str, instructions: str):
     from app.db.database import AsyncSessionLocal
-    result = await run_agent(domain, pipeline_type, extracted_text, instructions)
     async with AsyncSessionLocal() as db:
+        result = await run_agent(domain, pipeline_type, extracted_text, instructions, db=db)
         run = await db.get(AgentRun, run_id)
         if run:
             run.status = AgentStatus.failed if result.get("error") else AgentStatus.completed

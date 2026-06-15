@@ -1,13 +1,5 @@
-"""
-TextLens FastAPI application — Phase 2.
+# TextLens FastAPI application:
 
-New routers registered:
-  /api/batch      — bulk file processing
-  /api/keys       — API key management
-  /api/webhooks   — webhook endpoints
-  /api/agents/{id}/corrections — field correction loop
-  /api/audit      — immutable processing trail
-"""
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -21,13 +13,12 @@ from app.core.config import settings
 from app.db.database import engine, Base
 from app.db.redis import close_redis
 from app.api.routes import auth, jobs, users, agents, export
-
-# Phase 2 routers
 from app.api.routes.batch import router as batch_router
 from app.api.routes.apikeys import router as apikeys_router
 from app.api.routes.corrections import router as corrections_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.drive import router as drive_router
+from app.api.routes.schedules import router as schedules_router
 
 logging.basicConfig(level=logging.INFO)
 
@@ -58,19 +49,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Existing routers
+# Routers
 app.include_router(auth.router,    prefix="/api")
 app.include_router(jobs.router,    prefix="/api")
 app.include_router(users.router,   prefix="/api")
 app.include_router(agents.router,  prefix="/api")
 app.include_router(export.router,  prefix="/api")
-
-# Phase 2 routers 
 app.include_router(batch_router,       prefix="/api")
 app.include_router(apikeys_router,     prefix="/api")
 app.include_router(corrections_router, prefix="/api")
 app.include_router(chat_router,        prefix="/api")
 app.include_router(drive_router,       prefix="/api")
+app.include_router(schedules_router,   prefix="/api")
 
 
 # Health endpoints

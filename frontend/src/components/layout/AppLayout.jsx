@@ -5,12 +5,12 @@ import {
   FileText, Cpu, ClipboardList, ChevronDown, ChevronRight,
   Layers, Key, Webhook, ShieldCheck, Zap, Upload,
   HeartPulse, Scale, Truck, GraduationCap, Building2, FileSearch,
-  TrendingUp, MessageSquare,
+  TrendingUp, MessageSquare, CalendarClock,
 } from "lucide-react";
 import { useAuth } from "../../lib/AuthContext";
 import { useAgent } from "../../lib/AgentContext";
 
-/* ─────────────────────────────── nav config ──────────────────────── */
+// Navigation config
 
 const NAV = [
   {
@@ -53,6 +53,7 @@ const NAV = [
     label: "Batch",
     items: [
       { label: "Batch Jobs",        icon: Layers,       to: "/batch" },
+      { label: "Schedules",         icon: CalendarClock, to: "/schedules" },
     ],
   },
   {
@@ -70,7 +71,7 @@ const NAV = [
   },
 ];
 
-/* ─────────────────────────────── sidebar ─────────────────────────── */
+// Sidebar
 
 function SidebarContent({ close }) {
   const { user, logout } = useAuth();
@@ -83,7 +84,7 @@ function SidebarContent({ close }) {
   const isActive = (to) => {
     const [path, qs] = to.split("?");
     if (location.pathname !== path) return false;
-    if (!qs) return location.search === ""; // "All Pipelines" only active when no query
+    if (!qs) return location.search === "";
     return location.search === `?${qs}`;
   };
 
@@ -277,8 +278,7 @@ function SidebarContent({ close }) {
   );
 }
 
-/* ─────────────────────────────── shell ───────────────────────────── */
-
+// Shell
 export default function AppLayout({ children }) {
   const [mobileOpen, setMobileOpen] = useState(false);
 

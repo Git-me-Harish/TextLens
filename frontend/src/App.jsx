@@ -18,6 +18,7 @@ import { ImageOCRPage, PDFExtractPage, SummarizePage, PDFToWordPage } from "./pa
 import ApiKeysPage from "./pages/ApiKeysPage";
 import BatchPage from "./pages/BatchPage";
 import ChatHistoryPage from "./pages/ChatHistoryPage";
+import SchedulesPage from "./pages/SchedulesPage";
 
 function PL({ children }) {
   return <ProtectedRoute><AppLayout>{children}</AppLayout></ProtectedRoute>;
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="/webhooks" element={<PL><ApiKeysPage /></PL>} />
           <Route path="/batch" element={<PL><BatchPage /></PL>} />
           <Route path="/chat-history" element={<PL><ChatHistoryPage /></PL>} />
+          <Route path="/schedules" element={<PL><SchedulesPage /></PL>} />
 
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

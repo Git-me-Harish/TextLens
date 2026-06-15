@@ -27,3 +27,5 @@ authlib
 slowapi
 aiofiles
 email-validator
+celery
+croniter

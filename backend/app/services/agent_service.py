@@ -594,6 +594,7 @@ async def run_agent(
     pipeline_type: str,
     extracted_text: str,
     user_instructions: str = "",
+    db=None,   # optional AsyncSession — enables correction feedback injection
 ) -> dict[str, Any]:
     """
     Call Claude API to run domain agent on extracted text.
@@ -611,6 +612,16 @@ async def run_agent(
     if not system_prompt:
         # Graceful fallback — never hard fail on unknown pipeline
         system_prompt = DOMAIN_PROMPTS["general"]["document_analyzer"]
+
+    # Inject human correction examples if DB session provided
+    if db is not None:
+        try:
+            from app.services.feedback_service import get_few_shot_examples
+            few_shot = await get_few_shot_examples(db, domain, pipeline_type)
+            if few_shot:
+                system_prompt = system_prompt + few_shot
+        except Exception:
+            pass  # feedback is best-effort, never block the run
 
     user_msg = f"Document text:\n\n{extracted_text[:12000]}"
     if user_instructions:

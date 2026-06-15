@@ -18,7 +18,7 @@ import enum
 from app.db.database import Base
 
 
-# Enums 
+# Enums
 class UserRole(str, enum.Enum):
     admin = "admin"
     user  = "user"
@@ -63,7 +63,7 @@ class BatchStatus(str, enum.Enum):
     processing = "processing"
     completed  = "completed"
     failed     = "failed"
-    partial    = "partial"           # some items failed, some succeeded
+    partial    = "partial"       
 
 
 class WebhookEvent(str, enum.Enum):
@@ -73,7 +73,8 @@ class WebhookEvent(str, enum.Enum):
     batch_completed   = "batch.completed"
 
 
-# Core entities
+# ──────────────────────────────── core entities ────────────────────────
+
 class User(Base):
     __tablename__ = "users"
 
@@ -150,7 +151,8 @@ class AgentRun(Base):
     api_key: Mapped["APIKey | None"] = relationship("APIKey", back_populates="agent_runs")
 
 
-# Batch processing entities — for when users upload multiple files together and want aggregate tracking and results
+# ──────────────────────────────── batch ────────────────────────────────
+
 class BatchJob(Base):
     """One batch = multiple files processed with the same pipeline."""
     __tablename__ = "batch_jobs"
@@ -189,7 +191,8 @@ class BatchItem(Base):
     ocr_job: Mapped["OCRJob | None"] = relationship("OCRJob", back_populates="batch_item")
 
 
-# API keys
+# ──────────────────────────────── API keys ─────────────────────────────
+
 class APIKey(Base):
     """
     Enterprise API key — scoped to a user, stores hashed key.
@@ -213,7 +216,8 @@ class APIKey(Base):
     agent_runs: Mapped[list["AgentRun"]] = relationship("AgentRun", back_populates="api_key")
 
 
-# Webhooks
+# ──────────────────────────────── webhooks ─────────────────────────────
+
 class Webhook(Base):
     """
     User-registered webhook endpoint.
@@ -253,7 +257,8 @@ class WebhookDelivery(Base):
     webhook: Mapped["Webhook"] = relationship("Webhook", back_populates="deliveries")
 
 
-# Audit
+# ──────────────────────────────── audit ────────────────────────────────
+
 class AuditLog(Base):
     """
     Immutable processing trail.
@@ -274,7 +279,8 @@ class AuditLog(Base):
     user: Mapped["User"] = relationship("User", back_populates="audit_logs")
 
 
-# Corrections 
+# ──────────────────────────────── corrections ──────────────────────────
+
 class FieldCorrection(Base):
     """
     Human correction on an agent result field.
@@ -291,6 +297,30 @@ class FieldCorrection(Base):
 
     agent_run: Mapped["AgentRun"] = relationship("AgentRun", back_populates="corrections")
 
+
+
+class ScheduledBatch(Base):
+    """
+    Recurring batch job — runs on a cron schedule via Celery beat.
+    drive_folder_id: if set, pulls new files from Google Drive folder each run.
+    """
+    __tablename__ = "scheduled_batches"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(255))
+    cron_expr: Mapped[str] = mapped_column(String(64))      # e.g. "0 9 * * 1" = Mon 9am
+    domain: Mapped[str] = mapped_column(String(64))
+    pipeline_type: Mapped[str] = mapped_column(String(100))
+    drive_folder_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    user_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship("User")
 
 
 class ChatSession(Base):

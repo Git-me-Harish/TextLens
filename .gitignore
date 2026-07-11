@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual Environment
+venv/
+.env
+
+# Uploads
+backend/uploads/
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# VSCode
+.vscode/
+
+# Mac
+.DS_Store
+
+# Node
+frontend/node_modules/
+
+# Build folders
+frontend/dist/
+frontend/build/
+
+# Environment files
+.env
+.env.*
+
+!.env.example
+
+# Docker
+*.tar
+
+# Coverage
+coverage/
+htmlcov/
+
+# Secrets
+*.pem
+*.key

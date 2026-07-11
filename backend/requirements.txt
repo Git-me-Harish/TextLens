@@ -1,0 +1,34 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+# Passlib 1.7.x is incompatible with bcrypt 5.x (bcrypt enforces the 72-byte
+# limit during Passlib's backend capability check).
+bcrypt==4.0.1
+httpx
+sqlalchemy[asyncio]
+alembic
+asyncpg
+psycopg2-binary
+aiosqlite
+redis
+pydantic
+pydantic-settings
+python-dotenv
+PyMuPDF
+pytesseract
+Pillow
+PyPDF2
+python-docx
+reportlab
+unidecode
+numpy
+pandas
+openpyxl
+authlib
+slowapi
+aiofiles
+email-validator
+celery
+croniter

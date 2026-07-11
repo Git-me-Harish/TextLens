@@ -1,4 +1,4 @@
-# TextLens — Intelligent Document Processing Platform
+# TextLens : Intelligent Document Processing Platform
 
 TextLens is a production-grade, full-stack document intelligence platform that combines classical OCR with LLM-powered AI agents to extract, structure, analyze, and converse with documents across multiple industry domains (Finance, Healthcare, Legal, Logistics, HR, Education, Government).
 

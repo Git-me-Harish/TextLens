@@ -29,3 +29,5 @@ Verify Redis is up before starting Celery:
 ## PONG = good, start celery worker + beat
 FastAPI also uses Redis (rate limiting etc.) check your .env has:
 `REDIS_URL=redis://localhost:6379/0`
+
+# cd backend && ./venv/Scripts/python.exe -m pip install -r requirements.txt

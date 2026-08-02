@@ -1,14 +1,32 @@
-import os
-import uuid
-import asyncio
-import logging
+"""
+OCR jobs router — Track 1 hardened.
+
+What changed from V1
+
+File storage
+  All file I/O goes through storage_service (MinIO).
+  - Uploaded bytes → upload_bytes() → object key stored in job.file_path
+  - Result files   → uploaded by Celery worker → object key in job.result_file_path
+  - Downloads      → presigned URL redirect (no local disk, no FileResponse)
+  - Deletions      → delete_object() / delete_objects()
+  - Existence      → object_exists() replaces os.path.exists()
+
+Job dispatch
+  asyncio.ensure_future(_process_and_save(...)) → process_ocr_job.delay(job_id)
+  All processing happens inside the Celery 'ocr' queue worker.
+
+Security
+  - No user-supplied paths ever reach the filesystem or storage directly.
+  - All object keys come from the DB after user_id scope check.
+  - Download and delete verify job ownership via DB query before acting.
+"""
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+import logging
 from pathlib import Path
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -17,72 +35,65 @@ from app.core.config import settings
 from app.db.database import get_db
 from app.models.models import User, OCRJob, JobStatus, JobType
 from app.schemas.schemas import JobOut, JobListResponse, QuestionRequest
-from app.services.ocr_service import process_job
+from app.services import storage_service
+from app.worker.tasks import process_ocr_job
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
-# Dedicated thread pool — not affected by uvicorn reload
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ocr_worker")
+# Constants 
 
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/tiff", "image/bmp"}
+ALLOWED_IMAGE_TYPES = frozenset({
+    "image/jpeg", "image/png", "image/webp", "image/tiff", "image/bmp"
+})
 ALLOWED_PDF_TYPE = "application/pdf"
+
+_EXT_TO_MIME: dict[str, str] = {
+    ".pdf":  "application/pdf",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".tiff": "image/tiff",
+    ".tif":  "image/tiff",
+    ".bmp":  "image/bmp",
+    ".webp": "image/webp",
+}
+
+
+# Helpers 
+def _resolve_content_type(raw: str, filename: str) -> str:
+    """
+    Normalise content type — browsers sometimes send application/octet-stream
+    even for PDFs/images. Fall back to extension sniffing.
+    """
+    if raw not in ("application/octet-stream", "", None):
+        return raw
+    return _EXT_TO_MIME.get(Path(filename or "").suffix.lower(), raw or "application/octet-stream")
 
 
 def _allowed(content_type: str, job_type: str) -> bool:
-    if job_type == "ocr_image":
+    if job_type == JobType.ocr_image.value:
         return content_type in ALLOWED_IMAGE_TYPES
     return content_type == ALLOWED_PDF_TYPE
 
 
-async def _process_and_save(job_id: str, job_type: str, file_path: str, extra: dict):
-    """
-    Run OCR in dedicated thread pool, then persist result.
-    Uses asyncio.ensure_future so it survives outside the request lifecycle.
-    """
-    from app.db.database import AsyncSessionLocal
-
-    result = {"text": None, "file_path": None, "error": None, "page_count": None, "processing_time_ms": 0}
-
-    try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(_executor, process_job, job_type, file_path, extra)
-        logger.info(f"[job:{job_id[:8]}] ocr done in {result.get('processing_time_ms')}ms error={result.get('error')}")
-    except Exception as exc:
-        logger.error(f"[job:{job_id[:8]}] executor crashed: {exc}", exc_info=True)
-        result["error"] = f"{type(exc).__name__}: {exc}"
-
-    try:
-        async with AsyncSessionLocal() as db:
-            job = await db.get(OCRJob, job_id)
-            if job:
-                job.status = JobStatus.failed if result.get("error") else JobStatus.completed
-                job.result_text = result.get("text")
-                job.result_file_path = result.get("file_path")
-                job.error_message = result.get("error")
-                job.page_count = result.get("page_count")
-                job.processing_time_ms = result.get("processing_time_ms")
-                job.completed_at = datetime.utcnow()
-                await db.commit()
-                logger.info(f"[job:{job_id[:8]}] saved status={job.status.value}")
-
-                # Fire webhook — non-blocking, errors swallowed inside service
-                from app.services.webhook_service import fire_webhook
-                from app.models.models import WebhookEvent
-                event = WebhookEvent.job_failed if result.get("error") else WebhookEvent.job_completed
-                asyncio.ensure_future(fire_webhook(db, job.user_id, event, {
-                    "job_id": job.id,
-                    "job_type": job.job_type.value,
-                    "status": job.status.value,
-                    "original_filename": job.original_filename,
-                    "page_count": job.page_count,
-                    "processing_time_ms": job.processing_time_ms,
-                    "error_message": job.error_message,
-                }))
-    except Exception as db_exc:
-        logger.error(f"[job:{job_id[:8]}] DB write failed: {db_exc}", exc_info=True)
+def _validate_job_type(job_type: str) -> None:
+    valid = [jt.value for jt in JobType]
+    if job_type not in valid:
+        raise HTTPException(status_code=400, detail=f"Invalid job_type. Choose from: {valid}")
 
 
+async def _owned_job_or_404(db: AsyncSession, job_id: str, user_id: str) -> OCRJob:
+    """Fetch an OCRJob that belongs to the authenticated user or raise 404."""
+    row = (await db.execute(
+        select(OCRJob).where(OCRJob.id == job_id, OCRJob.user_id == user_id)
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return row
+
+
+# Routes 
 @router.post("/upload", response_model=JobOut, status_code=202)
 async def upload_file(
     file: UploadFile = File(...),
@@ -90,36 +101,36 @@ async def upload_file(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    valid_types = [jt.value for jt in JobType]
-    if job_type not in valid_types:
-        raise HTTPException(status_code=400, detail=f"Invalid job_type. Choose: {valid_types}")
+    """
+    Upload a file for OCR / PDF processing.
 
-    # Normalize content type — browsers sometimes send octet-stream
-    content_type = file.content_type or ""
-    if content_type in ("application/octet-stream", ""):
-        ext = Path(file.filename or "").suffix.lower()
-        ext_map = {
-            ".pdf": "application/pdf",
-            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".png": "image/png", ".tiff": "image/tiff",
-            ".tif": "image/tiff", ".bmp": "image/bmp",
-            ".webp": "image/webp",
-        }
-        content_type = ext_map.get(ext, content_type)
+    Flow:
+      1. Validate job_type + content-type.
+      2. Read bytes, enforce size limit, compute SHA-256.
+      3. Reject duplicate uploads (same hash + same user).
+      4. Upload bytes to MinIO — store object key in job.file_path.
+      5. Create OCRJob record (status = processing).
+      6. Dispatch process_ocr_job Celery task.
+    """
+    _validate_job_type(job_type)
 
+    content_type = _resolve_content_type(file.content_type or "", file.filename or "")
     if not _allowed(content_type, job_type):
-        raise HTTPException(status_code=400, detail=f"File type '{content_type}' not allowed for '{job_type}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type '{content_type}' is not allowed for job_type '{job_type}'.",
+        )
 
     content = await file.read()
-    if len(content) == 0:
-        raise HTTPException(status_code=400, detail="File is empty")
-    if len(content) > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"File exceeds {settings.MAX_FILE_SIZE_MB}MB")
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File exceeds {settings.MAX_FILE_SIZE_MB} MB limit.")
 
-    # A source is identified by its bytes, not by its filename.  This keeps
-    # user documents private while preventing the same source being stored
-    # and processed repeatedly across tools.
     file_hash = hashlib.sha256(content).hexdigest()
+
+    # Duplicate detection — same bytes already processed by this user
     existing = (await db.execute(
         select(OCRJob)
         .where(OCRJob.user_id == user.id, OCRJob.file_hash == file_hash)
@@ -137,31 +148,24 @@ async def upload_file(
             },
         )
 
-    # Save to disk
-    upload_dir = Path(settings.UPLOAD_DIR) / user.id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    ext = Path(file.filename or "file").suffix or ".bin"
-    file_path = str(upload_dir / f"{uuid.uuid4()}{ext}")
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # Upload to MinIO — object key is the file's address from now on
+    object_key = storage_service.build_upload_key(user.id, file.filename or "upload")
+    await storage_service.upload_bytes(content, object_key, content_type)
 
-    # Create job record
     job = OCRJob(
         user_id=user.id,
         job_type=job_type,
         status=JobStatus.processing,
         original_filename=file.filename or "unknown",
-        file_path=file_path,
+        file_path=object_key,
         file_hash=file_hash,
     )
     db.add(job)
     await db.flush()
     await db.refresh(job)
-    job_id = job.id
 
-    # Fire-and-forget using ensure_future — survives outside request lifecycle
-    asyncio.ensure_future(_process_and_save(job_id, job_type, file_path, {}))
-    logger.info(f"[job:{job_id[:8]}] queued type={job_type} size={len(content)}B")
+    process_ocr_job.delay(job.id)
+    logger.info("job.queued", job_id=job.id[:8], job_type=job_type, size_bytes=len(content))
     return job
 
 
@@ -172,30 +176,34 @@ async def reuse_source(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Create an operation from an existing user-owned source without re-uploading it."""
-    valid_types = [jt.value for jt in JobType]
-    if job_type not in valid_types:
-        raise HTTPException(status_code=400, detail=f"Invalid job_type. Choose: {valid_types}")
+    """
+    Create a new job from an already-uploaded file without re-uploading it.
+    Both the original and the new job share the same MinIO object key.
+    """
+    _validate_job_type(job_type)
+    source = await _owned_job_or_404(db, source_job_id, user.id)
 
-    source = (await db.execute(
-        select(OCRJob).where(OCRJob.id == source_job_id, OCRJob.user_id == user.id)
-    )).scalar_one_or_none()
-    if not source or not source.file_path or not os.path.exists(source.file_path):
-        raise HTTPException(status_code=404, detail="Source file not found")
+    if not source.file_path:
+        raise HTTPException(status_code=400, detail="Source job has no file associated.")
+
+    # Validate the object is still in MinIO (not deleted)
+    if not await storage_service.object_exists(source.file_path):
+        raise HTTPException(status_code=404, detail="Source file is no longer available in storage.")
 
     job = OCRJob(
         user_id=user.id,
         job_type=job_type,
         status=JobStatus.processing,
         original_filename=source.original_filename,
-        file_path=source.file_path,
+        file_path=source.file_path,      # shared object key — no re-upload
         file_hash=source.file_hash,
     )
     db.add(job)
     await db.flush()
     await db.refresh(job)
-    asyncio.ensure_future(_process_and_save(job.id, job_type, source.file_path, {}))
-    logger.info(f"[job:{job.id[:8]}] reusing source={source.id[:8]} type={job_type}")
+
+    process_ocr_job.delay(job.id)
+    logger.info("job.reuse_queued", job_id=job.id[:8], source_id=source_job_id[:8], job_type=job_type)
     return job
 
 
@@ -205,14 +213,16 @@ async def ask_question(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    res = await db.execute(select(OCRJob).where(OCRJob.id == data.job_id, OCRJob.user_id == user.id))
-    source = res.scalar_one_or_none()
-    if not source:
-        raise HTTPException(status_code=404, detail="Source job not found")
+    """
+    Run a Q&A query against an already-completed OCR job.
+    Creates a new pdf_qa OCRJob and dispatches it with the question in extra_data.
+    """
+    source = await _owned_job_or_404(db, data.job_id, user.id)
+
     if source.status != JobStatus.completed:
-        raise HTTPException(status_code=400, detail="Source job must be completed first")
+        raise HTTPException(status_code=400, detail="Source job must be completed before Q&A.")
     if not source.file_path:
-        raise HTTPException(status_code=400, detail="Source job has no file")
+        raise HTTPException(status_code=400, detail="Source job has no file associated.")
 
     qa_job = OCRJob(
         user_id=user.id,
@@ -225,9 +235,10 @@ async def ask_question(
     db.add(qa_job)
     await db.flush()
     await db.refresh(qa_job)
-    qa_id = qa_job.id
 
-    asyncio.ensure_future(_process_and_save(qa_id, "pdf_qa", source.file_path, {"question": data.question}))
+    # Pass the question through extra_data so process_job receives it
+    process_ocr_job.delay(qa_job.id, {"question": data.question})
+    logger.info("job.ask_queued", job_id=qa_job.id[:8], source_id=data.job_id[:8])
     return qa_job
 
 
@@ -238,44 +249,86 @@ async def list_jobs(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    per_page = min(per_page, 100)  # hard cap to prevent runaway queries
     offset = (page - 1) * per_page
-    total = (await db.execute(select(func.count(OCRJob.id)).where(OCRJob.user_id == user.id))).scalar()
+
+    total = (await db.execute(
+        select(func.count(OCRJob.id)).where(OCRJob.user_id == user.id)
+    )).scalar()
+
     jobs = (await db.execute(
-        select(OCRJob).where(OCRJob.user_id == user.id)
-        .order_by(OCRJob.created_at.desc()).offset(offset).limit(per_page)
+        select(OCRJob)
+        .where(OCRJob.user_id == user.id)
+        .order_by(OCRJob.created_at.desc())
+        .offset(offset)
+        .limit(per_page)
     )).scalars().all()
+
     return JobListResponse(jobs=list(jobs), total=total, page=page, per_page=per_page)
 
 
 @router.get("/{job_id}", response_model=JobOut)
-async def get_job(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
-    res = await db.execute(select(OCRJob).where(OCRJob.id == job_id, OCRJob.user_id == user.id))
-    job = res.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+async def get_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await _owned_job_or_404(db, job_id, user.id)
 
 
 @router.get("/{job_id}/download")
-async def download_result(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
-    res = await db.execute(select(OCRJob).where(OCRJob.id == job_id, OCRJob.user_id == user.id))
-    job = res.scalar_one_or_none()
-    if not job or not job.result_file_path:
-        raise HTTPException(status_code=404, detail="No result file")
-    if not os.path.exists(job.result_file_path):
-        raise HTTPException(status_code=404, detail="File missing from disk")
-    return FileResponse(job.result_file_path, filename=f"textlens_{job.original_filename}")
+async def download_result(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Returns a temporary presigned redirect URL (1 hour TTL) pointing directly
+    to the result file in MinIO. The browser downloads the file from MinIO,
+    not from the API server — no streaming overhead.
+
+    Security: job ownership is verified via DB query before key is used.
+    """
+    job = await _owned_job_or_404(db, job_id, user.id)
+
+    if not job.result_file_path:
+        raise HTTPException(status_code=404, detail="No result file available for this job.")
+
+    download_filename = f"textlens_{job.original_filename}"
+    presigned_url = await storage_service.get_presigned_url(
+        job.result_file_path,
+        expires_in=3600,
+        filename=download_filename,
+    )
+
+    # 302 → browser follows the presigned URL and downloads from MinIO directly
+    return RedirectResponse(url=presigned_url, status_code=302)
 
 
 @router.delete("/{job_id}", status_code=204)
-async def delete_job(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
-    res = await db.execute(select(OCRJob).where(OCRJob.id == job_id, OCRJob.user_id == user.id))
-    job = res.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    # A source may be referenced by jobs created through /reuse.  Remove its
-    # stored bytes only when this is the final reference.
-    shared_count = 0
+async def delete_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Delete the job record.
+
+    File cleanup logic:
+      - Source file (file_path): deleted only if no other job shares the same
+        object key (because /reuse jobs share the original upload).
+      - Result file (result_file_path): always deleted if present — result
+        files are unique per job, never shared.
+    """
+    job = await _owned_job_or_404(db, job_id, user.id)
+
+    keys_to_delete: list[str] = []
+
+    # Result file is always unique — safe to delete
+    if job.result_file_path:
+        keys_to_delete.append(job.result_file_path)
+
+    # Source file may be shared across /reuse jobs — only delete when last ref
     if job.file_path:
         shared_count = (await db.execute(
             select(func.count(OCRJob.id)).where(
@@ -283,30 +336,51 @@ async def delete_job(job_id: str, db: AsyncSession = Depends(get_db), user: User
                 OCRJob.id != job.id,
             )
         )).scalar() or 0
-    if job.file_path and shared_count == 0 and os.path.exists(job.file_path):
-        try:
-            os.remove(job.file_path)
-        except Exception:
-            pass
+
+        if shared_count == 0:
+            keys_to_delete.append(job.file_path)
+
     await db.delete(job)
+    await db.flush()
+
+    # Delete from MinIO after the DB row is gone to avoid orphaned records
+    if keys_to_delete:
+        await storage_service.delete_objects(keys_to_delete)
+
+    logger.info("job.deleted", job_id=job_id[:8], objects_removed=len(keys_to_delete))
 
 
 @router.post("/{job_id}/retry", response_model=JobOut)
-async def retry_job(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
-    res = await db.execute(select(OCRJob).where(OCRJob.id == job_id, OCRJob.user_id == user.id))
-    job = res.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+async def retry_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Re-queue a failed job. The original file must still exist in MinIO.
+    Resets status → processing, clears previous error/result fields.
+    """
+    job = await _owned_job_or_404(db, job_id, user.id)
+
     if job.status != JobStatus.failed:
-        raise HTTPException(status_code=400, detail="Only failed jobs can be retried")
-    if not job.file_path or not os.path.exists(job.file_path):
-        raise HTTPException(status_code=400, detail="Original file no longer on disk")
+        raise HTTPException(status_code=400, detail="Only failed jobs can be retried.")
+
+    if not job.file_path:
+        raise HTTPException(status_code=400, detail="Job has no source file to retry.")
+
+    if not await storage_service.object_exists(job.file_path):
+        raise HTTPException(
+            status_code=400,
+            detail="Source file is no longer available in storage. Please upload again.",
+        )
 
     job.status = JobStatus.processing
     job.error_message = None
     job.result_text = None
+    job.result_file_path = None
     job.completed_at = None
     await db.flush()
 
-    asyncio.ensure_future(_process_and_save(job.id, job.job_type.value, job.file_path, {}))
+    process_ocr_job.delay(job.id)
+    logger.info("job.retry_queued", job_id=job_id[:8])
     return job

@@ -1,34 +1,70 @@
+# Web framework 
 fastapi
 uvicorn[standard]
 python-multipart
+slowapi
+
+# Auth 
 python-jose[cryptography]
 passlib[bcrypt]
-# Passlib 1.7.x is incompatible with bcrypt 5.x (bcrypt enforces the 72-byte
-# limit during Passlib's backend capability check).
 bcrypt==4.0.1
-httpx
+authlib
+
+# Database 
 sqlalchemy[asyncio]
 alembic
 asyncpg
 psycopg2-binary
 aiosqlite
+
+# Cache / task queue 
 redis
+celery
+croniter
+
+# Object storage : MinIO / S3-compatible 
+aioboto3    
+ 
+# RAG : embeddings + vector search 
+voyageai          
+pgvector      
+ 
+# Real-time / SSE 
+sse-starlette 
+ 
+# Email notifications 
+resend            # Resend API client — free tier 3,000 emails/month
+ 
+# Observability 
+structlog         # structured logging (JSON in prod, coloured in dev)
+ 
+# HTTP client 
+httpx
+
+# Settings 
 pydantic
 pydantic-settings
 python-dotenv
+
+# OCR engines 
 PyMuPDF
 pytesseract
 Pillow
 PyPDF2
+
+# Document export 
 python-docx
 reportlab
-unidecode
+openpyxl
+
+# Data 
 numpy
 pandas
-openpyxl
-authlib
-slowapi
+unidecode
+
+# Utilities 
 aiofiles
 email-validator
-celery
-croniter
+
+# NLP
+spacy

@@ -20,6 +20,10 @@ backend/uploads/
 *.db
 *.sqlite3
 
+# Celery runtime files
+celerybeat-schedule*
+celerybeat.pid
+
 # Logs
 *.log
 

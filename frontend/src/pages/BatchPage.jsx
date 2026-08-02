@@ -1,5 +1,29 @@
-import { useState, useEffect, useRef } from "react";
+/**
+ * BatchPage — Track 2 hardened.
+ *
+ * What changed from V1
+ * 
+ * Polling (was: pollingRef + setInterval every 3000ms when active batches)
+ *   → useQuery(["batches"]) with dynamic refetchInterval:
+ *       - 3000ms while any batch is pending/processing
+ *       - false (disabled) when all batches are terminal
+ *     React Query de-duplicates concurrent requests automatically.
+ *
+ * SSE integration (zero extra code here):
+ *   useSSE.js already calls queryClient.invalidateQueries(["batches"])
+ *   on every "batch_update" event — when that arrives the list refreshes
+ *   instantly, even before the 3 s refetch fires.
+ *
+ * State mutations (submitBatch / handleDelete):
+ *   → queryClient.invalidateQueries so the server is the single source of
+ *     truth — no risk of local state drifting from actual batch progress.
+ *
+ * Download URL:
+ *   /api/batch/{id}/results → /api/v1/batch/{id}/results
+ */
+import { useState } from "react";
 import { useDropzone } from "react-dropzone";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Upload, Layers, CheckCircle2, XCircle, Clock,
   Download, RefreshCw, Trash2, ChevronDown, ChevronRight,
@@ -10,7 +34,7 @@ import api, { errMsg } from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
 import { formatDistanceToNow } from "date-fns";
 
-/* ─────────────────────────────── helpers ─────────────────────────── */
+/*  constants  */
 
 const STATUS_COLOR = {
   pending:    "var(--ink-muted)",
@@ -27,6 +51,10 @@ const STATUS_ICON = {
   failed:     <XCircle size={14} />,
   partial:    <AlertTriangle size={14} />,
 };
+
+const TERMINAL = new Set(["completed", "failed", "partial"]);
+
+/*  helpers  */
 
 function ProgressBar({ value, total, color }) {
   const pct = total > 0 ? Math.round((value / total) * 100) : 0;
@@ -55,8 +83,8 @@ function ProgressBar({ value, total, color }) {
 
 function BatchCard({ batch, onDelete, onDownload }) {
   const [expanded, setExpanded] = useState(false);
-  const color = STATUS_COLOR[batch.status] || "var(--ink-muted)";
-  const isDone = ["completed", "failed", "partial"].includes(batch.status);
+  const color  = STATUS_COLOR[batch.status] || "var(--ink-muted)";
+  const isDone = TERMINAL.has(batch.status);
 
   return (
     <div className="card" style={{ overflow: "hidden", marginBottom: "1rem" }}>
@@ -74,15 +102,10 @@ function BatchCard({ batch, onDelete, onDownload }) {
       >
         <div
           style={{
-            width: 36,
-            height: 36,
-            borderRadius: 10,
+            width: 36, height: 36, borderRadius: 10,
             background: "var(--paper-2)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color,
-            flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color, flexShrink: 0,
           }}
         >
           <Layers size={16} />
@@ -91,13 +114,8 @@ function BatchCard({ batch, onDelete, onDownload }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
-              fontWeight: 600,
-              fontSize: "0.875rem",
-              color: "var(--ink)",
-              marginBottom: 2,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+              fontWeight: 600, fontSize: "0.875rem", color: "var(--ink)", marginBottom: 2,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
             }}
           >
             {batch.name}
@@ -140,8 +158,8 @@ function BatchCard({ batch, onDelete, onDownload }) {
         </div>
       </div>
 
-      {/* Progress */}
-      {(batch.status === "processing" || batch.status === "pending") && (
+      {/* Live progress bar while running */}
+      {!TERMINAL.has(batch.status) && (
         <div style={{ padding: "0.875rem 1.25rem", borderBottom: "1px solid var(--border)" }}>
           <ProgressBar
             value={batch.completed_files}
@@ -151,16 +169,14 @@ function BatchCard({ batch, onDelete, onDownload }) {
         </div>
       )}
 
-      {/* Expanded items */}
+      {/* Expanded per-item list */}
       {expanded && batch.items && batch.items.length > 0 && (
         <div style={{ maxHeight: 320, overflowY: "auto" }}>
           {batch.items.map((item) => (
             <div
               key={item.id}
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
+                display: "flex", alignItems: "center", gap: 10,
                 padding: "0.625rem 1.25rem",
                 borderBottom: "1px solid var(--border)",
               }}
@@ -168,12 +184,8 @@ function BatchCard({ batch, onDelete, onDownload }) {
               <FileText size={13} style={{ color: "var(--ink-muted)", flexShrink: 0 }} />
               <span
                 style={{
-                  flex: 1,
-                  fontSize: "0.82rem",
-                  color: "var(--ink-secondary)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
+                  flex: 1, fontSize: "0.82rem", color: "var(--ink-secondary)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                 }}
               >
                 {item.original_filename}
@@ -181,11 +193,8 @@ function BatchCard({ batch, onDelete, onDownload }) {
               <div
                 style={{
                   color: STATUS_COLOR[item.status],
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4,
-                  fontSize: "0.75rem",
-                  flexShrink: 0,
+                  display: "flex", alignItems: "center", gap: 4,
+                  fontSize: "0.75rem", flexShrink: 0,
                 }}
               >
                 {STATUS_ICON[item.status]}
@@ -204,17 +213,9 @@ function BatchCard({ batch, onDelete, onDownload }) {
         </div>
       )}
 
-      {/* Aggregate stats when done */}
+      {/* Aggregate stats footer when done */}
       {isDone && (
-        <div
-          style={{
-            padding: "0.75rem 1.25rem",
-            display: "flex",
-            gap: 24,
-            background: "var(--paper)",
-            fontSize: "0.8rem",
-          }}
-        >
+        <div style={{ padding: "0.75rem 1.25rem", display: "flex", gap: 24, background: "var(--paper)", fontSize: "0.8rem" }}>
           <span style={{ color: "var(--success)" }}>✓ {batch.completed_files} completed</span>
           {batch.failed_files > 0 && (
             <span style={{ color: "var(--danger)" }}>✗ {batch.failed_files} failed</span>
@@ -226,73 +227,54 @@ function BatchCard({ batch, onDelete, onDownload }) {
   );
 }
 
-/* ─────────────────────────────── page ────────────────────────────── */
+/*  page  */
 
 export default function BatchPage() {
-  const [catalog, setCatalog] = useState(null);
-  const [batches, setBatches] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
-  // New batch form state
-  const [files, setFiles] = useState([]);
-  const [domain, setDomain] = useState("");
-  const [pipeline, setPipeline] = useState("");
-  const [batchName, setBatchName] = useState("");
+  // Catalog (static — no interval needed) 
+  const { data: catalog } = useQuery({
+    queryKey: ["catalog"],
+    queryFn: () => api.get("/agents/catalog").then((r) => r.data),
+    staleTime: Infinity, // catalog never changes during a session
+  });
+
+  // Batch list — React Query replaces setInterval + pollingRef 
+  // refetchInterval is a function: dynamically returns 3000ms while any
+  // batch is still processing, false (disabled) once all are terminal.
+  // SSE batch_update events independently invalidate this query the
+  // instant a batch completes — the interval is just a safety net.
+  const { data: batchData, isLoading } = useQuery({
+    queryKey: ["batches"],
+    queryFn: () => api.get("/batch?per_page=30").then((r) => r.data),
+    refetchInterval: (query) => {
+      const list = query.state.data?.batches ?? [];
+      return list.some((b) => !TERMINAL.has(b.status)) ? 3000 : false;
+    },
+  });
+
+  const batches = batchData?.batches ?? [];
+
+  // New batch form state 
+  const [files, setFiles]           = useState([]);
+  const [domain, setDomain]         = useState("");
+  const [pipeline, setPipeline]     = useState("");
+  const [batchName, setBatchName]   = useState("");
   const [instructions, setInstructions] = useState("");
   const [submitting, setSubmitting] = useState(false);
-
-  // Polling refs
-  const pollingRef = useRef(null);
-
-  const loadBatches = async () => {
-    try {
-      const { data } = await api.get("/batch?per_page=30");
-      setBatches(data.batches);
-    } catch {
-      /* silent */
-    }
-  };
-
-  useEffect(() => {
-    Promise.all([
-      api.get("/agents/catalog"),
-      api.get("/batch?per_page=30"),
-    ]).then(([c, b]) => {
-      setCatalog(c.data);
-      setBatches(b.data.batches);
-    }).finally(() => setLoading(false));
-  }, []);
-
-  // Poll for active batches
-  useEffect(() => {
-    const hasActive = batches.some(
-      (b) => b.status === "processing" || b.status === "pending"
-    );
-
-    if (hasActive) {
-      pollingRef.current = setInterval(loadBatches, 3000);
-    } else {
-      clearInterval(pollingRef.current);
-    }
-
-    return () => clearInterval(pollingRef.current);
-  }, [batches]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: (accepted) => setFiles((prev) => [...prev, ...accepted]),
     accept: {
-      "application/pdf": [],
-      "image/jpeg": [],
-      "image/png": [],
-      "image/webp": [],
-      "image/tiff": [],
-      "application/zip": [],
+      "application/pdf": [], "image/jpeg": [], "image/png": [],
+      "image/webp": [], "image/tiff": [], "application/zip": [],
     },
     multiple: true,
   });
 
   const removeFile = (idx) => setFiles((f) => f.filter((_, i) => i !== idx));
 
+  // Submit batch 
   const submitBatch = async () => {
     if (!files.length) return toast.error("Add at least one file");
     if (!domain || !pipeline) return toast.error("Select domain and pipeline");
@@ -310,7 +292,9 @@ export default function BatchPage() {
         headers: { "Content-Type": "multipart/form-data" },
       });
       toast.success(`Batch started — ${data.total_files} files queued`);
-      setBatches((prev) => [data, ...prev]);
+      // Invalidate so React Query refetches the list including the new batch.
+      // refetchInterval will kick in automatically since the new batch is "processing".
+      queryClient.invalidateQueries({ queryKey: ["batches"] });
       setFiles([]);
       setDomain("");
       setPipeline("");
@@ -323,22 +307,29 @@ export default function BatchPage() {
     }
   };
 
+  // Delete batch 
   const handleDelete = async (id) => {
     if (!confirm("Delete this batch job?")) return;
     try {
       await api.delete(`/batch/${id}`);
-      setBatches((prev) => prev.filter((b) => b.id !== id));
+      // Optimistic: remove from cache immediately, server confirms on next refetch
+      queryClient.setQueryData(["batches"], (old) => ({
+        ...old,
+        batches: (old?.batches ?? []).filter((b) => b.id !== id),
+      }));
       toast.success("Batch deleted");
     } catch (err) {
       toast.error(errMsg(err, "Delete failed"));
+      queryClient.invalidateQueries({ queryKey: ["batches"] });
     }
   };
 
+  // Download results 
   const handleDownload = (id) => {
-    window.open(`/api/batch/${id}/results`, "_blank");
+    window.open(`/api/v1/batch/${id}/results`, "_blank");
   };
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div style={{ display: "flex", justifyContent: "center", paddingTop: "4rem" }}>
         <Spinner size={32} />
@@ -367,59 +358,33 @@ export default function BatchPage() {
         </h2>
 
         {/* File drop */}
-        <div
-          {...getRootProps()}
-          className={`dropzone ${isDragActive ? "active" : ""}`}
-          style={{ marginBottom: "1.25rem" }}
-        >
+        <div {...getRootProps()} className={`dropzone ${isDragActive ? "active" : ""}`} style={{ marginBottom: "1.25rem" }}>
           <input {...getInputProps()} />
           {isDragActive ? (
             <div className="dropzone-title">Drop files here...</div>
           ) : (
             <>
-              <div className="dropzone-icon">
-                <Upload size={24} />
-              </div>
+              <div className="dropzone-icon"><Upload size={24} /></div>
               <div className="dropzone-title">Drop files or a ZIP archive</div>
-              <div className="dropzone-sub">
-                PDF, JPG, PNG, WEBP, TIFF — or a ZIP of any combination — max 50 files
-              </div>
+              <div className="dropzone-sub">PDF, JPG, PNG, WEBP, TIFF — or a ZIP of any combination — max 50 files</div>
             </>
           )}
         </div>
 
-        {/* File list */}
+        {/* Staged file list */}
         {files.length > 0 && (
-          <div
-            style={{
-              marginBottom: "1.25rem",
-              maxHeight: 180,
-              overflowY: "auto",
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-            }}
-          >
+          <div style={{ marginBottom: "1.25rem", maxHeight: 180, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8 }}>
             {files.map((f, i) => (
               <div
                 key={i}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
+                  display: "flex", alignItems: "center", gap: 8,
                   padding: "0.5rem 0.875rem",
                   borderBottom: i < files.length - 1 ? "1px solid var(--border)" : "none",
                 }}
               >
                 <FileText size={13} style={{ color: "var(--ink-muted)", flexShrink: 0 }} />
-                <span
-                  style={{
-                    flex: 1,
-                    fontSize: "0.82rem",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
+                <span style={{ flex: 1, fontSize: "0.82rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {f.name}
                 </span>
                 <span style={{ fontSize: "0.72rem", color: "var(--ink-muted)" }}>
@@ -442,12 +407,7 @@ export default function BatchPage() {
             <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, marginBottom: 6, color: "var(--ink-muted)" }}>
               Batch name
             </label>
-            <input
-              className="form-input"
-              placeholder="e.g. Q4 Invoices"
-              value={batchName}
-              onChange={(e) => setBatchName(e.target.value)}
-            />
+            <input className="form-input" placeholder="e.g. Q4 Invoices" value={batchName} onChange={(e) => setBatchName(e.target.value)} />
           </div>
 
           <div>
@@ -512,7 +472,7 @@ export default function BatchPage() {
         </div>
       </div>
 
-      {/* Existing batches */}
+      {/* Batch history */}
       <div>
         <h2 style={{ fontSize: "0.95rem", fontWeight: 600, marginBottom: "1rem" }}>
           Batch history

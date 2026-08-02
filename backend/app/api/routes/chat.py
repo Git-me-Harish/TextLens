@@ -19,7 +19,6 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 # Schemas:
-
 class StartRequest(BaseModel):
     job_id: str
 
@@ -51,7 +50,6 @@ class SessionOut(BaseModel):
 
 
 # Endpoints:
-
 @router.post("/sessions", response_model=StartResponse, status_code=201)
 async def start_session(
     data: StartRequest,
@@ -116,7 +114,14 @@ async def ask(
     user_msg = {"role": "user", "content": data.message}
     history.append(user_msg)
 
-    result = await chat_with_document(document_text=job.result_text, messages=history)
+    # Track 3: pass job_id + db so chat_service uses RAG retrieval.
+    # fallback_text is used only when chunks aren't ingested yet.
+    result = await chat_with_document(
+        job_id=session.job_id,
+        messages=history,
+        db=db,
+        fallback_text=job.result_text,
+    )
 
     if result["error"]:
         raise HTTPException(502, result["error"])

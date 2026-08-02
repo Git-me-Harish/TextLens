@@ -1,10 +1,22 @@
 """
-Celery application — uses Redis as both broker and result backend.
-Beat scheduler handles cron-based scheduled batches.
+Celery application — Redis as broker + result backend.
+
+Queues
+──────
+  default  — general tasks (schedule dispatch)
+  ocr      — OCR processing tasks (CPU-bound, isolated concurrency)
+  agents   — Claude API agent runs (I/O-bound, rate-limited)
+  ingest   — RAG ingestion tasks (Voyage AI embed + pgvector writes)
+
+Routing
+───────
+  All Celery workers consume all queues by default (see docker-compose).
+  In production, scale independently:
+    celery -A app.worker.celery_app worker -Q ocr     --concurrency=2
+    celery -A app.worker.celery_app worker -Q agents  --concurrency=8
+    celery -A app.worker.celery_app worker -Q ingest  --concurrency=4
 """
 from celery import Celery
-from celery.schedules import crontab
-
 from app.core.config import settings
 
 celery_app = Celery(
@@ -15,21 +27,39 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
+    # Serialization
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
+
+    # Time
     timezone="UTC",
     enable_utc=True,
+
+    # Reliability
     task_track_started=True,
-    task_acks_late=True,           # re-queue on worker crash
-    worker_prefetch_multiplier=1,  # one task at a time per worker
-    result_expires=86400,          # results kept 24h
+    task_acks_late=True,            # re-queue if worker crashes mid-task
+    worker_prefetch_multiplier=1,   # one task per worker slot — no hoarding
+    task_reject_on_worker_lost=True,
+
+    # Results
+    result_expires=86_400,          # keep results 24 h
+
+    # Queue routing
+    task_default_queue="default",
+    task_routes={
+        "app.worker.tasks.process_ocr_job":              {"queue": "ocr"},
+        "app.worker.tasks.process_agent_run":            {"queue": "agents"},
+        "app.worker.tasks.ingest_document":              {"queue": "ingest"},
+        "app.worker.tasks.check_and_dispatch_schedules": {"queue": "default"},
+        "app.worker.tasks.process_scheduled_batch":      {"queue": "default"},
+    },
 )
 
-# Beat schedule — poll every minute to check due ScheduledBatches
+# Beat schedule — check for due ScheduledBatches every 60 seconds
 celery_app.conf.beat_schedule = {
     "check-scheduled-batches": {
         "task": "app.worker.tasks.check_and_dispatch_schedules",
-        "schedule": 60.0,   # every 60 seconds
+        "schedule": 60.0,
     },
 }

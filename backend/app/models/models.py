@@ -13,13 +13,17 @@ from sqlalchemy import (
     ForeignKey, Enum as SAEnum, JSON, BigInteger,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB, TSVECTOR
+from pgvector.sqlalchemy import Vector
 import enum
 from app.db.database import Base
 
+# Voyage AI voyage-3 output dimensionality.
+# Change here + run migration 003 if you switch embedding models.
+VOYAGE_EMBEDDING_DIM = 1024
 
-# ──────────────────────────────── enums ────────────────────────────────
 
+# enums 
 class UserRole(str, enum.Enum):
     admin = "admin"
     user  = "user"
@@ -74,8 +78,7 @@ class WebhookEvent(str, enum.Enum):
     batch_completed   = "batch.completed"
 
 
-# ──────────────────────────────── core entities ────────────────────────
-
+# core entities 
 class User(Base):
     __tablename__ = "users"
 
@@ -152,8 +155,7 @@ class AgentRun(Base):
     api_key: Mapped["APIKey | None"] = relationship("APIKey", back_populates="agent_runs")
 
 
-# ──────────────────────────────── batch ────────────────────────────────
-
+# Batch 
 class BatchJob(Base):
     """One batch = multiple files processed with the same pipeline."""
     __tablename__ = "batch_jobs"
@@ -192,8 +194,7 @@ class BatchItem(Base):
     ocr_job: Mapped["OCRJob | None"] = relationship("OCRJob", back_populates="batch_item")
 
 
-# ──────────────────────────────── API keys ─────────────────────────────
-
+# API keys 
 class APIKey(Base):
     """
     Enterprise API key — scoped to a user, stores hashed key.
@@ -217,8 +218,7 @@ class APIKey(Base):
     agent_runs: Mapped[list["AgentRun"]] = relationship("AgentRun", back_populates="api_key")
 
 
-# ──────────────────────────────── webhooks ─────────────────────────────
-
+# Webhooks 
 class Webhook(Base):
     """
     User-registered webhook endpoint.
@@ -258,8 +258,7 @@ class WebhookDelivery(Base):
     webhook: Mapped["Webhook"] = relationship("Webhook", back_populates="deliveries")
 
 
-# ──────────────────────────────── audit ────────────────────────────────
-
+# Audit 
 class AuditLog(Base):
     """
     Immutable processing trail.
@@ -280,8 +279,7 @@ class AuditLog(Base):
     user: Mapped["User"] = relationship("User", back_populates="audit_logs")
 
 
-# ──────────────────────────────── corrections ──────────────────────────
-
+# Corrections 
 class FieldCorrection(Base):
     """
     Human correction on an agent result field.
@@ -356,3 +354,56 @@ class PasswordResetToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped["User"] = relationship("User", back_populates="password_reset_tokens")
+
+class DocumentChunk(Base):
+    """
+    One semantic chunk of an OCR-extracted document, with its Voyage AI
+    dense embedding and PostgreSQL tsvector for BM25 search.
+
+    Lifecycle:
+      - Created by the `ingest_document` Celery task after OCR completes.
+      - Deleted automatically (CASCADE) when the parent OCRJob is deleted.
+      - Re-created on retry ingestion (old rows deleted, new rows inserted).
+
+    Indexes (defined in migration 002):
+      HNSW  on embedding   — ANN cosine search
+      GIN   on ts_vector   — BM25 keyword search
+      B-tree on job_id     — always present in WHERE clause
+    """
+    __tablename__ = "document_chunks"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    job_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("ocr_jobs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Dense vector — populated by embedding_service.embed_documents()
+    # Not using Mapped[list[float]] because pgvector's Vector type needs
+    # explicit SQLAlchemy type annotation bypass.
+    embedding = mapped_column(Vector(VOYAGE_EMBEDDING_DIM), nullable=True)
+
+    # Sparse vector — populated via to_tsvector() in the ingest task.
+    # Used by BM25 full-text search with PostgreSQL's @@ operator.
+    ts_vector = mapped_column(TSVECTOR, nullable=True)
+
+    # Optional structured metadata: page hint, section title, etc.
+    chunk_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships (read-only helpers — no back_populates needed)
+    job: Mapped["OCRJob"] = relationship("OCRJob")

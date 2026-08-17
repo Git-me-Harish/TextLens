@@ -27,20 +27,21 @@ Output per chunk:
     }
   }
 """
+
 import re
 from typing import TypedDict
 
-#  Tuning constants 
-CHARS_PER_TOKEN   = 4          # English approximation
-TARGET_TOKENS     = 400        # ideal chunk size
-MAX_TOKENS        = 512        # hard cap before forced split
-OVERLAP_TOKENS    = 60         # tail of previous chunk re-included
-MIN_TOKENS        = 30         # discard chunks shorter than this
+#  Tuning constants
+CHARS_PER_TOKEN = 4  # English approximation
+TARGET_TOKENS = 400  # ideal chunk size
+MAX_TOKENS = 512  # hard cap before forced split
+OVERLAP_TOKENS = 60  # tail of previous chunk re-included
+MIN_TOKENS = 30  # discard chunks shorter than this
 
-TARGET_CHARS  = TARGET_TOKENS  * CHARS_PER_TOKEN   # 1600
-MAX_CHARS     = MAX_TOKENS     * CHARS_PER_TOKEN   # 2048
-OVERLAP_CHARS = OVERLAP_TOKENS * CHARS_PER_TOKEN   # 240
-MIN_CHARS     = MIN_TOKENS     * CHARS_PER_TOKEN   # 120
+TARGET_CHARS = TARGET_TOKENS * CHARS_PER_TOKEN  # 1600
+MAX_CHARS = MAX_TOKENS * CHARS_PER_TOKEN  # 2048
+OVERLAP_CHARS = OVERLAP_TOKENS * CHARS_PER_TOKEN  # 240
+MIN_CHARS = MIN_TOKENS * CHARS_PER_TOKEN  # 120
 
 
 class ChunkDict(TypedDict):
@@ -50,14 +51,14 @@ class ChunkDict(TypedDict):
     metadata: dict
 
 
-#  Helpers 
+#  Helpers
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // CHARS_PER_TOKEN)
 
 
-_SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
-_HEADING      = re.compile(r'\n#{1,6}\s+.+')        # Markdown headings
-_SECTION_SEP  = re.compile(r'\n{2,}')               # paragraph break
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_HEADING = re.compile(r"\n#{1,6}\s+.+")  # Markdown headings
+_SECTION_SEP = re.compile(r"\n{2,}")  # paragraph break
 
 
 def _split_into_sentences(text: str) -> list[str]:
@@ -97,7 +98,7 @@ def _split_paragraph_if_needed(para: str) -> list[str]:
     return pieces
 
 
-#  Main function 
+#  Main function
 def chunk_document(text: str) -> list[ChunkDict]:
     """
     Split `text` into overlapping semantic chunks.
@@ -109,16 +110,16 @@ def chunk_document(text: str) -> list[ChunkDict]:
     if not text:
         return []
 
-    #  1. Split on paragraph breaks 
+    #  1. Split on paragraph breaks
     raw_paragraphs = _SECTION_SEP.split(text)
     raw_paragraphs = [p.strip() for p in raw_paragraphs if p.strip()]
 
-    #  2. Sub-split any oversized paragraphs 
+    #  2. Sub-split any oversized paragraphs
     pieces: list[str] = []
     for para in raw_paragraphs:
         pieces.extend(_split_paragraph_if_needed(para))
 
-    #  3. Accumulate pieces into TARGET_CHARS-sized chunks 
+    #  3. Accumulate pieces into TARGET_CHARS-sized chunks
     raw_chunks: list[str] = []
     current = ""
 
@@ -134,7 +135,7 @@ def chunk_document(text: str) -> list[ChunkDict]:
     if current:
         raw_chunks.append(current)
 
-    #  4. Apply overlap — prepend tail of previous chunk 
+    #  4. Apply overlap — prepend tail of previous chunk
     result: list[ChunkDict] = []
     prev_tail = ""
 
@@ -152,20 +153,28 @@ def chunk_document(text: str) -> list[ChunkDict]:
             )
             break
 
-        content_with_overlap = (prev_tail + "\n\n" + chunk_text).strip() if prev_tail else chunk_text
+        content_with_overlap = (
+            (prev_tail + "\n\n" + chunk_text).strip() if prev_tail else chunk_text
+        )
         is_overlap = bool(prev_tail)
 
-        result.append(ChunkDict(
-            content=content_with_overlap,
-            chunk_index=idx,
-            token_count=_estimate_tokens(content_with_overlap),
-            metadata={
-                "is_overlap": is_overlap,
-                "raw_char_count": len(chunk_text),
-            },
-        ))
+        result.append(
+            ChunkDict(
+                content=content_with_overlap,
+                chunk_index=idx,
+                token_count=_estimate_tokens(content_with_overlap),
+                metadata={
+                    "is_overlap": is_overlap,
+                    "raw_char_count": len(chunk_text),
+                },
+            )
+        )
 
         # Tail for next chunk: last OVERLAP_CHARS of the current (pre-overlap) chunk
-        prev_tail = chunk_text[-OVERLAP_CHARS:].strip() if len(chunk_text) > OVERLAP_CHARS else ""
+        prev_tail = (
+            chunk_text[-OVERLAP_CHARS:].strip()
+            if len(chunk_text) > OVERLAP_CHARS
+            else ""
+        )
 
     return result

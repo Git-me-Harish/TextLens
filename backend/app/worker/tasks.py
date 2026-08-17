@@ -12,23 +12,25 @@ Task registry:
   check_and_dispatch_schedules  — beat, every 60 s
   process_scheduled_batch(schedule_id)
 """
+
 import asyncio
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
-
-from app.services.sse_service import publish_event as _publish_sse
 from app.services.email_service import (
-    send_job_notification as _send_job_email,
     send_agent_notification as _send_agent_email,
 )
+from app.services.email_service import (
+    send_job_notification as _send_job_email,
+)
+from app.services.sse_service import publish_event as _publish_sse
 
 logger = structlog.get_logger(__name__)
 
 
-# Asyncio bridge 
+# asyncio bridge
 def _run_async(coro):
     """Run an async coroutine from a synchronous Celery task."""
     try:
@@ -41,8 +43,9 @@ def _run_async(coro):
     return loop.run_until_complete(coro)
 
 
-# Task: OCR processing 
+# Task: OCR processing
 from app.worker.celery_app import celery_app
+
 
 @celery_app.task(
     name="app.worker.tasks.process_ocr_job",
@@ -68,10 +71,9 @@ def process_ocr_job(self, job_id: str, extra_data: dict | None = None) -> dict:
 
 async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
     from concurrent.futures import ThreadPoolExecutor
-    from sqlalchemy import select
 
     from app.db.database import AsyncSessionLocal
-    from app.models.models import OCRJob, JobStatus, WebhookEvent, User
+    from app.models.models import JobStatus, OCRJob, User, WebhookEvent
     from app.services import storage_service
     from app.services.ocr_service import process_job
     from app.services.webhook_service import fire_webhook
@@ -81,7 +83,7 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
     tmp_result: str | None = None
 
     try:
-        # 1. Fetch job 
+        # 1. Fetch job
         async with AsyncSessionLocal() as db:
             job = await db.get(OCRJob, job_id)
             if not job:
@@ -98,15 +100,35 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
 
         log.info("job.started", object_key=object_key, job_type=job_type)
 
-        # 2. Download source from MinIO 
+        # 2. Download source from MinIO
         ext = Path(original_filename).suffix or ".bin"
         tmp_input = await storage_service.download_to_temp(object_key, suffix=ext)
 
-        # 3. Run OCR in thread pool (CPU-bound / blocking) 
+        # 3. Resolve multi-file extra keys for Studio operations
+        # pdf_merge and images_to_pdf pass extra MinIO keys that must be
+        # downloaded to temp files before process_job can use them.
+        resolved_extra = dict(extra_data or {})
+
+        if "input_paths_keys" in resolved_extra:
+            extra_tmp_paths = []
+            for key in resolved_extra.pop("input_paths_keys"):
+                tmp = await storage_service.download_to_temp(key, suffix=".pdf")
+                extra_tmp_paths.append(tmp)
+            resolved_extra["input_paths"] = extra_tmp_paths
+
+        if "image_paths_keys" in resolved_extra:
+            extra_tmp_paths = []
+            for key in resolved_extra.pop("image_paths_keys"):
+                ext = Path(key).suffix or ".jpg"
+                tmp = await storage_service.download_to_temp(key, suffix=ext)
+                extra_tmp_paths.append(tmp)
+            resolved_extra["image_paths"] = extra_tmp_paths
+
+        # 4. Run OCR in thread pool (CPU-bound / blocking)
         loop = asyncio.get_running_loop()
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr") as pool:
             ocr_result: dict = await loop.run_in_executor(
-                pool, process_job, job_type, tmp_input, extra_data or {}
+                pool, process_job, job_type, tmp_input, resolved_extra
             )
 
         log.info(
@@ -115,19 +137,25 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
             has_error=bool(ocr_result.get("error")),
         )
 
-        # 4. Upload result file (docx etc.) to MinIO 
+        # 4. Upload result file (docx etc.) to MinIO
         result_key: str | None = None
         local_result_path: str | None = ocr_result.get("file_path")
 
         if local_result_path and os.path.exists(local_result_path):
             result_filename = Path(local_result_path).name
-            result_key = storage_service.build_result_key(user_id, job_id, result_filename)
+            result_key = storage_service.build_result_key(
+                user_id, job_id, result_filename
+            )
             content_type = storage_service.content_type_for(result_filename)
-            await storage_service.upload_file(local_result_path, result_key, content_type)
+            await storage_service.upload_file(
+                local_result_path, result_key, content_type
+            )
             tmp_result = local_result_path
 
-        # 5. Persist result to DB 
-        final_status = JobStatus.failed if ocr_result.get("error") else JobStatus.completed
+        # 5. Persist result to DB
+        final_status = (
+            JobStatus.failed if ocr_result.get("error") else JobStatus.completed
+        )
 
         async with AsyncSessionLocal() as db:
             job = await db.get(OCRJob, job_id)
@@ -143,27 +171,31 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
                 await db.commit()
                 log.info("job.saved", status=job.status.value)
 
-        # 6a. Trigger RAG ingestion if text was extracted 
+        # 6a. Trigger RAG ingestion if text was extracted
         if final_status == JobStatus.completed and ocr_result.get("text"):
             ingest_document.apply_async(
                 args=[job_id],
-                countdown=2,   # slight delay so DB commit is visible to the worker
+                countdown=2,  # slight delay so DB commit is visible to the worker
             )
             log.info("job.ingest_queued", job_id=job_id[:8])
 
-        # 6b. Publish SSE event (sync — safe here) 
-        _publish_sse(user_id, "job_update", {
-            "job_id": job_id,
-            "status": final_status.value,
-            "job_type": job_type,
-            "original_filename": original_filename,
-            "page_count": ocr_result.get("page_count"),
-            "processing_time_ms": ocr_result.get("processing_time_ms"),
-            "result_file_path": result_key,
-            "error_message": ocr_result.get("error"),
-        })
+        # 6b. Publish SSE event (sync — safe here)
+        _publish_sse(
+            user_id,
+            "job_update",
+            {
+                "job_id": job_id,
+                "status": final_status.value,
+                "job_type": job_type,
+                "original_filename": original_filename,
+                "page_count": ocr_result.get("page_count"),
+                "processing_time_ms": ocr_result.get("processing_time_ms"),
+                "result_file_path": result_key,
+                "error_message": ocr_result.get("error"),
+            },
+        )
 
-        # 7. Send email notification 
+        # 7. Send email notification
         if user:
             _send_job_email(
                 to_email=user.email,
@@ -175,20 +207,25 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
                 error_message=ocr_result.get("error"),
             )
 
-        # 8. Fire webhook 
+        # 8. Fire webhook
         wh_event = (
-            WebhookEvent.job_failed if ocr_result.get("error")
+            WebhookEvent.job_failed
+            if ocr_result.get("error")
             else WebhookEvent.job_completed
         )
-        await fire_webhook(user_id, wh_event, {
-            "job_id": job_id,
-            "job_type": job_type,
-            "status": final_status.value,
-            "original_filename": original_filename,
-            "page_count": ocr_result.get("page_count"),
-            "processing_time_ms": ocr_result.get("processing_time_ms"),
-            "error_message": ocr_result.get("error"),
-        })
+        await fire_webhook(
+            user_id,
+            wh_event,
+            {
+                "job_id": job_id,
+                "job_type": job_type,
+                "status": final_status.value,
+                "original_filename": original_filename,
+                "page_count": ocr_result.get("page_count"),
+                "processing_time_ms": ocr_result.get("processing_time_ms"),
+                "error_message": ocr_result.get("error"),
+            },
+        )
 
         return {"job_id": job_id, "status": final_status.value}
 
@@ -203,11 +240,15 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
                     job.completed_at = datetime.utcnow()
                     await db.commit()
             # Still push SSE failure so UI stops spinning
-            _publish_sse(user_id, "job_update", {
-                "job_id": job_id,
-                "status": "failed",
-                "error_message": str(exc),
-            })
+            _publish_sse(
+                user_id,
+                "job_update",
+                {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error_message": str(exc),
+                },
+            )
         except Exception:
             pass
         raise
@@ -221,7 +262,7 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
                     pass
 
 
-# Task: Agent run 
+# Task: Agent run
 @celery_app.task(
     name="app.worker.tasks.process_agent_run",
     bind=True,
@@ -245,7 +286,9 @@ def process_agent_run(
       4. Send email notification
       5. Fire webhook
     """
-    return _run_async(_run_agent(run_id, domain, pipeline_type, extracted_text, instructions))
+    return _run_async(
+        _run_agent(run_id, domain, pipeline_type, extracted_text, instructions)
+    )
 
 
 async def _run_agent(
@@ -256,16 +299,23 @@ async def _run_agent(
     instructions: str,
 ) -> dict:
     from app.db.database import AsyncSessionLocal
-    from app.models.models import AgentRun, AgentStatus, WebhookEvent, User
+    from app.models.models import AgentRun, AgentStatus, User, WebhookEvent
     from app.services.agent_service import run_agent
     from app.services.webhook_service import fire_webhook
 
-    log = logger.bind(run_id=run_id[:8], domain=domain, pipeline=pipeline_type, task="process_agent_run")
+    log = logger.bind(
+        run_id=run_id[:8],
+        domain=domain,
+        pipeline=pipeline_type,
+        task="process_agent_run",
+    )
     log.info("agent.started")
 
     try:
         result = await run_agent(domain, pipeline_type, extracted_text, instructions)
-        final_status = AgentStatus.failed if result.get("error") else AgentStatus.completed
+        final_status = (
+            AgentStatus.failed if result.get("error") else AgentStatus.completed
+        )
 
         user_id: str | None = None
         original_filename: str | None = None
@@ -290,19 +340,23 @@ async def _run_agent(
         if not user_id:
             return {"run_id": run_id, "status": "skipped_no_run"}
 
-        # Publish SSE event 
-        _publish_sse(user_id, "agent_update", {
-            "run_id": run_id,
-            "domain": domain,
-            "pipeline_type": pipeline_type,
-            "status": final_status.value,
-            "original_filename": original_filename,
-            "confidence_score": result.get("confidence"),
-            "processing_time_ms": result.get("processing_time_ms"),
-            "error_message": result.get("error"),
-        })
+        # Publish SSE event
+        _publish_sse(
+            user_id,
+            "agent_update",
+            {
+                "run_id": run_id,
+                "domain": domain,
+                "pipeline_type": pipeline_type,
+                "status": final_status.value,
+                "original_filename": original_filename,
+                "confidence_score": result.get("confidence"),
+                "processing_time_ms": result.get("processing_time_ms"),
+                "error_message": result.get("error"),
+            },
+        )
 
-        # Send email 
+        # Send email
         if user:
             _send_agent_email(
                 to_email=user.email,
@@ -316,17 +370,21 @@ async def _run_agent(
                 error_message=result.get("error"),
             )
 
-        # Fire webhook 
-        await fire_webhook(user_id, WebhookEvent.agent_completed, {
-            "run_id": run_id,
-            "domain": domain,
-            "pipeline_type": pipeline_type,
-            "status": final_status.value,
-            "original_filename": original_filename,
-            "confidence_score": result.get("confidence"),
-            "processing_time_ms": result.get("processing_time_ms"),
-            "error_message": result.get("error"),
-        })
+        # Fire webhook
+        await fire_webhook(
+            user_id,
+            WebhookEvent.agent_completed,
+            {
+                "run_id": run_id,
+                "domain": domain,
+                "pipeline_type": pipeline_type,
+                "status": final_status.value,
+                "original_filename": original_filename,
+                "confidence_score": result.get("confidence"),
+                "processing_time_ms": result.get("processing_time_ms"),
+                "error_message": result.get("error"),
+            },
+        )
 
         return {"run_id": run_id, "status": final_status.value}
 
@@ -340,17 +398,21 @@ async def _run_agent(
                     run.error_message = f"{type(exc).__name__}: {exc}"
                     run.completed_at = datetime.utcnow()
                     await db.commit()
-                    _publish_sse(run.user_id, "agent_update", {
-                        "run_id": run_id,
-                        "status": "failed",
-                        "error_message": str(exc),
-                    })
+                    _publish_sse(
+                        run.user_id,
+                        "agent_update",
+                        {
+                            "run_id": run_id,
+                            "status": "failed",
+                            "error_message": str(exc),
+                        },
+                    )
         except Exception:
             pass
         raise
 
 
-# Task: Scheduled batch dispatch 
+# Task: Scheduled batch dispatch
 @celery_app.task(name="app.worker.tasks.check_and_dispatch_schedules", bind=True)
 def check_and_dispatch_schedules(self):
     """Beat task — fires every 60 s. Finds due ScheduledBatches and enqueues them."""
@@ -358,9 +420,9 @@ def check_and_dispatch_schedules(self):
 
 
 async def _check_schedules_async():
-    from sqlalchemy import select
     from app.db.database import AsyncSessionLocal
     from app.models.models import ScheduledBatch
+    from sqlalchemy import select
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     dispatched = 0
@@ -375,7 +437,9 @@ async def _check_schedules_async():
         due = res.scalars().all()
 
         for schedule in due:
-            logger.info("schedule.dispatching", schedule_id=schedule.id[:8], name=schedule.name)
+            logger.info(
+                "schedule.dispatching", schedule_id=schedule.id[:8], name=schedule.name
+            )
             process_scheduled_batch.delay(schedule.id)
             schedule.last_run_at = now
             schedule.next_run_at = _calc_next_run(schedule.cron_expr)
@@ -391,10 +455,13 @@ async def _check_schedules_async():
 
 def _calc_next_run(cron_expr: str):
     from croniter import croniter
-    return croniter(cron_expr, datetime.now(timezone.utc).replace(tzinfo=None)).get_next(datetime)
+
+    return croniter(
+        cron_expr, datetime.now(timezone.utc).replace(tzinfo=None)
+    ).get_next(datetime)
 
 
-# Task: Scheduled batch execution 
+# Task: Scheduled batch execution
 @celery_app.task(
     name="app.worker.tasks.process_scheduled_batch",
     bind=True,
@@ -408,7 +475,13 @@ def process_scheduled_batch(self, schedule_id: str):
 
 async def _run_scheduled_batch(schedule_id: str):
     from app.db.database import AsyncSessionLocal
-    from app.models.models import ScheduledBatch, BatchJob, BatchItem, BatchStatus, AgentDomain
+    from app.models.models import (
+        AgentDomain,
+        BatchItem,
+        BatchJob,
+        BatchStatus,
+        ScheduledBatch,
+    )
     from app.services.batch_service import run_batch_job
 
     async with AsyncSessionLocal() as db:
@@ -421,10 +494,16 @@ async def _run_scheduled_batch(schedule_id: str):
 
         if schedule.drive_folder_id:
             try:
-                from app.services.drive_service import list_folder_files, download_file_to_storage
+                from app.services.drive_service import (
+                    download_file_to_storage,
+                    list_folder_files,
+                )
+
                 files = await list_folder_files(schedule.drive_folder_id)
                 for f in files:
-                    key = await download_file_to_storage(f["id"], f["name"], schedule.user_id)
+                    key = await download_file_to_storage(
+                        f["id"], f["name"], schedule.user_id
+                    )
                     file_paths.append((key, f["name"]))
             except Exception as exc:
                 logger.error("scheduled_batch.drive_error", error=str(exc))
@@ -465,7 +544,7 @@ async def _run_scheduled_batch(schedule_id: str):
     return {"batch_id": batch_id, "files": len(file_paths)}
 
 
-# Task: Document ingestion (RAG) 
+# Task: Document ingestion (RAG)
 @celery_app.task(
     name="app.worker.tasks.ingest_document",
     bind=True,
@@ -496,16 +575,16 @@ def ingest_document(self, job_id: str) -> dict:
 async def _run_ingest(job_id: str) -> dict:
     import json as _json
     import uuid as _uuid
-    from sqlalchemy import text as _text
 
     from app.db.database import AsyncSessionLocal
-    from app.models.models import OCRJob, JobStatus
+    from app.models.models import JobStatus, OCRJob
     from app.services.chunking_service import chunk_document
     from app.services.embedding_service import embed_documents, vec_to_pg_str
+    from sqlalchemy import text as _text
 
     log = logger.bind(job_id=job_id[:8], task="ingest_document")
 
-    # 1. Fetch job 
+    # 1. Fetch job
     async with AsyncSessionLocal() as db:
         job = await db.get(OCRJob, job_id)
         if not job:
@@ -517,12 +596,12 @@ async def _run_ingest(job_id: str) -> dict:
         if not job.result_text or not job.result_text.strip():
             log.warning("ingest.no_text")
             return {"skipped": "no result_text"}
-        text    = job.result_text
+        text = job.result_text
         user_id = job.user_id
 
     log.info("ingest.started", text_len=len(text))
 
-    # 2. Chunk 
+    # 2. Chunk
     chunks = chunk_document(text)
     if not chunks:
         log.warning("ingest.no_chunks")
@@ -530,13 +609,13 @@ async def _run_ingest(job_id: str) -> dict:
 
     log.info("ingest.chunked", count=len(chunks))
 
-    # 3. Embed (batched via Voyage AI) 
+    # 3. Embed (batched via Voyage AI)
     texts_to_embed = [c["content"] for c in chunks]
-    embeddings     = await embed_documents(texts_to_embed)
+    embeddings = await embed_documents(texts_to_embed)
 
     log.info("ingest.embedded", count=len(embeddings))
 
-    # 4 + 5. Upsert — delete old chunks then bulk insert new ones 
+    # 4 + 5. Upsert — delete old chunks then bulk insert new ones
     async with AsyncSessionLocal() as db:
         # Delete existing (idempotent re-ingestion)
         await db.execute(
@@ -559,14 +638,14 @@ async def _run_ingest(job_id: str) -> dict:
                          :metadata, NOW())
                 """),
                 {
-                    "id":          str(_uuid.uuid4()),
-                    "job_id":      job_id,
-                    "user_id":     user_id,
+                    "id": str(_uuid.uuid4()),
+                    "job_id": job_id,
+                    "user_id": user_id,
                     "chunk_index": chunk["chunk_index"],
-                    "content":     chunk["content"],
+                    "content": chunk["content"],
                     "token_count": chunk["token_count"],
-                    "vec":         vec_str,
-                    "metadata":    _json.dumps(chunk.get("metadata", {})),
+                    "vec": vec_str,
+                    "metadata": _json.dumps(chunk.get("metadata", {})),
                 },
             )
 
@@ -574,3 +653,145 @@ async def _run_ingest(job_id: str) -> dict:
 
     log.info("ingest.complete", chunks_stored=len(chunks))
     return {"job_id": job_id, "chunks": len(chunks)}
+
+
+# Task: Webhook retry with exponential backoff
+@celery_app.task(
+    name="app.worker.tasks.retry_webhook_delivery",
+    bind=True,
+    queue="webhooks",
+    max_retries=0,  # self-managed retry logic — no Celery auto-retry
+    acks_late=True,
+)
+def retry_webhook_delivery(
+    self,
+    webhook_id: str,
+    event_str: str,
+    payload_json: str,
+    attempt: int,
+) -> dict:
+    """
+    Deliver a single webhook attempt and schedule the next retry on failure.
+
+    Args:
+        webhook_id   — Webhook.id to deliver to
+        event_str    — event name string (e.g. "job.completed")
+        payload_json — full JSON-encoded payload (includes event + timestamp + data)
+        attempt      — 1-based attempt number (2 = first Celery-managed retry)
+
+    Backoff schedule (from webhook_service.BACKOFF_DELAYS):
+        Attempt 2 → 30 s
+        Attempt 3 → 5 min
+        Attempt 4 → 30 min
+        Attempt 5 → 2 hours (final — permanently_failed if this fails)
+
+    Each attempt is recorded in webhook_deliveries (append-only audit trail).
+    """
+    return _run_async(_do_webhook_retry(webhook_id, event_str, payload_json, attempt))
+
+
+async def _do_webhook_retry(
+    webhook_id: str,
+    event_str: str,
+    payload_json: str,
+    attempt: int,
+) -> dict:
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import json as _json
+
+    import httpx
+    from app.db.database import AsyncSessionLocal
+    from app.models.models import Webhook, WebhookDelivery
+    from app.services.webhook_service import MAX_ATTEMPTS, TIMEOUT_SECS, _schedule_retry
+
+    log = logger.bind(webhook_id=webhook_id[:8], event=event_str, attempt=attempt)
+
+    async with AsyncSessionLocal() as db:
+        wh = await db.get(Webhook, webhook_id)
+
+        # Abort if webhook was deleted or deactivated since scheduling
+        if not wh or not wh.is_active:
+            log.info("webhook.retry_skipped", reason="not_found_or_inactive")
+            return {"skipped": True, "reason": "inactive"}
+
+        payload_bytes = payload_json.encode()
+
+        # Build HMAC signature if webhook has a secret
+        headers = {
+            "Content-Type": "application/json",
+            "X-TextLens-Event": event_str,
+            "User-Agent": "TextLens-Webhook/2.0",
+            "X-Retry-Attempt": str(attempt),
+        }
+        if wh.secret:
+            digest = _hmac.new(
+                wh.secret.encode(), payload_bytes, _hashlib.sha256
+            ).hexdigest()
+            headers["X-TextLens-Signature"] = f"sha256={digest}"
+
+        # Attempt HTTP delivery
+        status_code: int | None = None
+        error_msg: str | None = None
+        success = False
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    wh.target_url,
+                    content=payload_bytes,
+                    headers=headers,
+                    timeout=TIMEOUT_SECS,
+                )
+            status_code = resp.status_code
+            success = 200 <= status_code < 300
+        except Exception as exc:
+            error_msg = str(exc)
+
+        if success:
+            log.info("webhook.retry_delivered", status=status_code)
+        else:
+            log.warning("webhook.retry_failed", status=status_code, error=error_msg)
+
+        # Persist delivery record
+        try:
+            payload_dict = _json.loads(payload_json)
+        except Exception:
+            payload_dict = {"raw": payload_json}
+
+        db.add(
+            WebhookDelivery(
+                webhook_id=wh.id,
+                event=event_str,
+                payload=payload_dict,
+                status_code=status_code,
+                success=success,
+                error_message=error_msg,
+                attempt=attempt,
+            )
+        )
+        wh.last_triggered_at = __import__("datetime").datetime.utcnow()
+        wh.total_deliveries = (wh.total_deliveries or 0) + 1
+        db.add(wh)
+        await db.commit()
+
+    # Schedule next retry if still failing
+    if not success:
+        next_attempt = attempt + 1
+        if next_attempt <= MAX_ATTEMPTS:
+            _schedule_retry(webhook_id, event_str, payload_json, next_attempt)
+        else:
+            logger.warning(
+                "webhook.permanently_failed",
+                webhook_id=webhook_id[:8],
+                event=event_str,
+                total_attempts=attempt,
+            )
+
+    return {
+        "webhook_id": webhook_id,
+        "event": event_str,
+        "attempt": attempt,
+        "success": success,
+        "status": status_code,
+    }

@@ -15,16 +15,14 @@ Image preprocessing chain (improves accuracy significantly):
   5. Tesseract with best config
 """
 
+import math
 import os
 import re
 import time
-import math
-import tempfile
-from pathlib import Path
-from typing import Optional
 
 try:
     import fitz  # PyMuPDF
+
     HAS_FITZ = True
 except ImportError:
     HAS_FITZ = False
@@ -32,6 +30,7 @@ except ImportError:
 try:
     import pytesseract
     from pytesseract import Output
+
     HAS_TESSERACT = True
     try:
         pytesseract.get_tesseract_version()
@@ -43,7 +42,8 @@ except ImportError:
     TESSERACT_BINARY_OK = False
 
 try:
-    from PIL import Image, ImageFilter, ImageOps, ImageEnhance
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -51,6 +51,7 @@ except ImportError:
 try:
     import cv2
     import numpy as np
+
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
@@ -58,17 +59,22 @@ except ImportError:
 try:
     from unidecode import unidecode
 except ImportError:
-    def unidecode(s): return s
+
+    def unidecode(s):
+        return s
+
 
 try:
     from docx import Document as DocxDocument
     from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+
     HAS_DOCX = True
 except ImportError:
     HAS_DOCX = False
 
 try:
     import pandas as pd
+
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
@@ -94,15 +100,14 @@ def check_dependencies() -> dict:
     }
 
 
-# ── Image preprocessing ──────────────────────────────────────────────────────
-
+# Image preprocessing
 def _pil_to_cv2(pil_img):
     import numpy as np
+
     return cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
 
 def _cv2_to_pil(cv2_img):
-    import numpy as np
     return Image.fromarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB))
 
 
@@ -110,7 +115,9 @@ def _deskew(img_cv2):
     """Detect and correct skew angle using Hough transform."""
     gray = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    lines = cv2.HoughLinesP(edges, 1, math.pi / 180, threshold=100, minLineLength=100, maxLineGap=10)
+    lines = cv2.HoughLinesP(
+        edges, 1, math.pi / 180, threshold=100, minLineLength=100, maxLineGap=10
+    )
     if lines is None:
         return img_cv2
     angles = []
@@ -129,7 +136,9 @@ def _deskew(img_cv2):
         return img_cv2
     h, w = img_cv2.shape[:2]
     M = cv2.getRotationMatrix2D((w // 2, h // 2), median_angle, 1.0)
-    return cv2.warpAffine(img_cv2, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return cv2.warpAffine(
+        img_cv2, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+    )
 
 
 def _upscale_if_small(img: Image.Image, min_dpi_width: int = 1200) -> Image.Image:
@@ -164,9 +173,7 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 
         # Adaptive threshold → binary image (handles uneven lighting)
         binary = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 31, 10
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10
         )
 
         # Slight sharpening kernel
@@ -176,18 +183,19 @@ def preprocess_image(img: Image.Image) -> Image.Image:
         return Image.fromarray(sharpened)
     else:
         # PIL-only fallback
-        img = img.convert("L")                          # grayscale
-        img = ImageOps.autocontrast(img, cutoff=2)      # contrast stretch
+        img = img.convert("L")  # grayscale
+        img = ImageOps.autocontrast(img, cutoff=2)  # contrast stretch
         img = img.filter(ImageFilter.SHARPEN)
         return img
 
 
-# ── Core OCR functions ────────────────────────────────────────────────────────
-
+# Core OCR functions
 def ocr_image_file(image_path: str) -> str:
     """OCR a single image file with preprocessing."""
     if not HAS_TESSERACT or not TESSERACT_BINARY_OK:
-        raise RuntimeError("Tesseract not available. Install tesseract-ocr system package.")
+        raise RuntimeError(
+            "Tesseract not available. Install tesseract-ocr system package."
+        )
     if not HAS_PIL:
         raise RuntimeError("Pillow not installed.")
 
@@ -245,13 +253,17 @@ def extract_pdf(pdf_path: str) -> tuple[str, int]:
             img = _pdf_page_to_image(page)
             processed = preprocess_image(img)
             try:
-                ocr_text = pytesseract.image_to_string(processed, config=TESS_CONFIG, lang="eng")
+                ocr_text = pytesseract.image_to_string(
+                    processed, config=TESS_CONFIG, lang="eng"
+                )
                 page_texts.append(ocr_text.strip())
                 ocr_pages += 1
             except Exception as e:
                 page_texts.append(f"[Page {page_num + 1} OCR failed: {e}]")
         else:
-            page_texts.append(native_text or f"[Page {page_num + 1}: no text, Tesseract unavailable]")
+            page_texts.append(
+                native_text or f"[Page {page_num + 1}: no text, Tesseract unavailable]"
+            )
 
     doc.close()
     full_text = "\n\n--- Page Break ---\n\n".join(t for t in page_texts if t)
@@ -274,7 +286,13 @@ def extract_pdf_sections(pdf_path: str) -> list[dict]:
                 for span in line["spans"]:
                     text = unidecode(span["text"]).strip()
                     if text:
-                        rows.append({"text": text, "size": span["size"], "bold": "bold" in span["font"].lower()})
+                        rows.append(
+                            {
+                                "text": text,
+                                "size": span["size"],
+                                "bold": "bold" in span["font"].lower(),
+                            }
+                        )
     doc.close()
 
     if not rows:
@@ -285,10 +303,14 @@ def extract_pdf_sections(pdf_path: str) -> list[dict]:
     sections, current_heading, current_body = [], "Document", []
 
     for row in rows:
-        is_heading = row["size"] > body_size + 1.5 or (row["bold"] and row["size"] >= body_size + 0.5)
+        is_heading = row["size"] > body_size + 1.5 or (
+            row["bold"] and row["size"] >= body_size + 0.5
+        )
         if is_heading:
             if current_body:
-                sections.append({"heading": current_heading, "content": " ".join(current_body)})
+                sections.append(
+                    {"heading": current_heading, "content": " ".join(current_body)}
+                )
             current_heading = row["text"]
             current_body = []
         else:
@@ -297,7 +319,9 @@ def extract_pdf_sections(pdf_path: str) -> list[dict]:
     if current_body:
         sections.append({"heading": current_heading, "content": " ".join(current_body)})
 
-    return sections or [{"heading": "Full Text", "content": " ".join(r["text"] for r in rows)}]
+    return sections or [
+        {"heading": "Full Text", "content": " ".join(r["text"] for r in rows)}
+    ]
 
 
 def sections_to_word(sections: list[dict], output_path: str) -> str:
@@ -324,8 +348,11 @@ def summarize_text(text: str, ratio: float = 0.3) -> str:
         if len(w) > 3:
             freq[w] = freq.get(w, 0) + 1
     scored = sorted(
-        [(sum(freq.get(w.lower(), 0) for w in re.findall(r"\w+", s)), s) for s in sentences],
-        key=lambda x: -x[0]
+        [
+            (sum(freq.get(w.lower(), 0) for w in re.findall(r"\w+", s)), s)
+            for s in sentences
+        ],
+        key=lambda x: -x[0],
     )
     keep = max(3, int(len(scored) * ratio))
     return ". ".join(s for _, s in scored[:keep]) + "."
@@ -338,15 +365,21 @@ def answer_question(question: str, text: str) -> str:
         return "Please ask a more specific question."
     sentences = [s.strip() for s in re.split(r"[.!?\n]+", text) if len(s.strip()) > 15]
     scored = sorted(
-        [(sum(1 for kw in keywords if kw in s.lower()), s)
-         for s in sentences if any(kw in s.lower() for kw in keywords)],
-        key=lambda x: -x[0]
+        [
+            (sum(1 for kw in keywords if kw in s.lower()), s)
+            for s in sentences
+            if any(kw in s.lower() for kw in keywords)
+        ],
+        key=lambda x: -x[0],
     )
-    return " ".join(s for _, s in scored[:5]) if scored else "No relevant information found."
+    return (
+        " ".join(s for _, s in scored[:5])
+        if scored
+        else "No relevant information found."
+    )
 
 
-# ── Main dispatcher ───────────────────────────────────────────────────────────
-
+# Main dispatcher
 def process_job(job_type: str, file_path: str, extra: dict = None) -> dict:
     """
     Run OCR job synchronously (called in thread executor from async context).
@@ -354,7 +387,13 @@ def process_job(job_type: str, file_path: str, extra: dict = None) -> dict:
     """
     start = time.time()
     extra = extra or {}
-    result = {"text": None, "file_path": None, "error": None, "page_count": None, "processing_time_ms": 0}
+    result = {
+        "text": None,
+        "file_path": None,
+        "error": None,
+        "page_count": None,
+        "processing_time_ms": 0,
+    }
 
     try:
         if not os.path.exists(file_path):
@@ -386,6 +425,54 @@ def process_job(job_type: str, file_path: str, extra: dict = None) -> dict:
             result["text"] = answer_question(extra.get("question", ""), text)
             result["page_count"] = pages
 
+        elif job_type == "pdf_to_markdown":
+            md_text, pages = pdf_to_markdown(file_path)
+            out_path = file_path.rsplit(".", 1)[0] + ".md"
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(md_text)
+            result["text"] = md_text[:2000] + ("..." if len(md_text) > 2000 else "")
+            result["file_path"] = out_path
+            result["page_count"] = pages
+
+        elif job_type == "pdf_merge":
+            # extra["input_paths"] — list of additional local PDF paths to merge
+            # The primary file_path is merged first
+            input_paths = [file_path] + (extra.get("input_paths") or [])
+            out_path = file_path.rsplit(".", 1)[0] + "_merged.pdf"
+            _, total_pages = pdf_merge(input_paths, out_path)
+            result["file_path"] = out_path
+            result["text"] = (
+                f"Merged {len(input_paths)} PDF(s) into {total_pages} pages"
+            )
+            result["page_count"] = total_pages
+
+        elif job_type == "pdf_split":
+            from_page = int(extra.get("from_page", 1))
+            to_page = int(extra.get("to_page", 1))
+            out_path = file_path.rsplit(".", 1)[0] + f"_pages_{from_page}-{to_page}.pdf"
+            _, page_count = pdf_split(file_path, from_page, to_page, out_path)
+            result["file_path"] = out_path
+            result["text"] = (
+                f"Extracted pages {from_page}–{to_page} ({page_count} page(s))"
+            )
+            result["page_count"] = page_count
+
+        elif job_type == "pdf_compress":
+            out_path = file_path.rsplit(".", 1)[0] + "_compressed.pdf"
+            _, reduction_pct = pdf_compress(file_path, out_path)
+            result["file_path"] = out_path
+            result["text"] = f"Compressed PDF — {reduction_pct}% size reduction"
+            result["page_count"] = 1
+
+        elif job_type == "images_to_pdf":
+            # extra["image_paths"] — additional image paths to include after file_path
+            image_paths = [file_path] + (extra.get("image_paths") or [])
+            out_path = file_path.rsplit(".", 1)[0] + "_combined.pdf"
+            _, page_count = images_to_pdf(image_paths, out_path)
+            result["file_path"] = out_path
+            result["text"] = f"Combined {page_count} image(s) into PDF"
+            result["page_count"] = page_count
+
         else:
             raise ValueError(f"Unknown job type: {job_type}")
 
@@ -394,3 +481,162 @@ def process_job(job_type: str, file_path: str, extra: dict = None) -> dict:
 
     result["processing_time_ms"] = int((time.time() - start) * 1000)
     return result
+
+
+# Document Studio handlers
+def pdf_to_markdown(pdf_path: str) -> tuple[str, int]:
+    """
+    Convert a PDF to Markdown format.
+    Uses PyMuPDF's markdown output (available in PyMuPDF >= 1.24.0).
+    Falls back to plain text with heading detection for older versions.
+    """
+    if not HAS_FITZ:
+        raise RuntimeError("PyMuPDF not installed.")
+
+    doc = fitz.open(pdf_path)
+    pages_md = []
+
+    for i, page in enumerate(doc):
+        # Try native markdown output first (PyMuPDF 1.24+)
+        try:
+            md = page.get_text("markdown")
+            if md and md.strip():
+                pages_md.append(md.strip())
+                continue
+        except Exception:
+            pass
+
+        # Fallback: simulate markdown from block structure
+        lines = []
+        for block in page.get_text("dict")["blocks"]:
+            if block["type"] != 0:
+                continue
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    text = unidecode(span["text"]).strip()
+                    if not text:
+                        continue
+                    size = span["size"]
+                    bold = "bold" in span["font"].lower()
+                    if size >= 18:
+                        lines.append(f"\n# {text}")
+                    elif size >= 14 or (bold and size >= 12):
+                        lines.append(f"\n## {text}")
+                    elif bold:
+                        lines.append(f"\n**{text}**")
+                    else:
+                        lines.append(text)
+        pages_md.append("\n".join(lines))
+
+    doc.close()
+    full_md = "\n\n---\n\n".join(
+        f"<!-- Page {i+1} -->\n{md}" for i, md in enumerate(pages_md) if md.strip()
+    )
+    return full_md, len(pages_md)
+
+
+def pdf_merge(input_paths: list[str], output_path: str) -> tuple[str, int]:
+    """
+    Merge multiple PDFs into a single output file.
+    input_paths — list of local PDF file paths in desired order.
+    Returns (output_path, total_page_count).
+    """
+    if not HAS_FITZ:
+        raise RuntimeError("PyMuPDF not installed.")
+    if len(input_paths) < 2:
+        raise ValueError("At least two PDFs required for merge.")
+
+    merged = fitz.open()
+    total_pages = 0
+
+    for path in input_paths:
+        src = fitz.open(path)
+        merged.insert_pdf(src)
+        total_pages += len(src)
+        src.close()
+
+    merged.save(output_path, deflate=True, garbage=3)
+    merged.close()
+    return output_path, total_pages
+
+
+def pdf_split(
+    pdf_path: str, from_page: int, to_page: int, output_path: str
+) -> tuple[str, int]:
+    """
+    Extract a page range from a PDF (1-indexed, inclusive).
+    Returns (output_path, page_count).
+    """
+    if not HAS_FITZ:
+        raise RuntimeError("PyMuPDF not installed.")
+
+    src = fitz.open(pdf_path)
+    total = len(src)
+
+    from_page = max(1, min(from_page, total))
+    to_page = max(from_page, min(to_page, total))
+
+    out = fitz.open()
+    out.insert_pdf(src, from_page=from_page - 1, to_page=to_page - 1)  # 0-indexed
+    out.save(output_path, deflate=True, garbage=3)
+    out.close()
+    src.close()
+
+    page_count = to_page - from_page + 1
+    return output_path, page_count
+
+
+def pdf_compress(pdf_path: str, output_path: str) -> tuple[str, int]:
+    """
+    Reduce PDF file size using PyMuPDF's garbage collection + deflate compression.
+    garbage=4 removes redundant objects; deflate=True uses zlib on streams.
+    """
+    if not HAS_FITZ:
+        raise RuntimeError("PyMuPDF not installed.")
+
+    doc = fitz.open(pdf_path)
+    doc.save(
+        output_path,
+        garbage=4,  # aggressive cross-reference + object deduplication
+        deflate=True,  # compress all streams
+        clean=True,  # clean content streams
+        deflate_images=True,
+        deflate_fonts=True,
+    )
+    doc.close()
+
+    original_size = os.path.getsize(pdf_path)
+    compressed_size = os.path.getsize(output_path)
+    reduction_pct = (
+        round((1 - compressed_size / original_size) * 100, 1) if original_size else 0
+    )
+
+    return output_path, reduction_pct  # returns output_path + reduction %
+
+
+def images_to_pdf(image_paths: list[str], output_path: str) -> tuple[str, int]:
+    """
+    Combine one or more images into a single PDF.
+    Each image becomes one page.
+    Returns (output_path, page_count).
+    """
+    if not HAS_FITZ:
+        raise RuntimeError("PyMuPDF not installed.")
+    if not image_paths:
+        raise ValueError("No images provided.")
+
+    doc = fitz.open()
+
+    for img_path in image_paths:
+        img_doc = fitz.open(img_path)  # works for JPEG, PNG, TIFF, BMP
+        rect = img_doc[0].rect
+        pdf_bytes = img_doc.convert_to_pdf()  # convert image to single-page PDF
+        img_doc.close()
+
+        img_pdf = fitz.open("pdf", pdf_bytes)
+        doc.insert_pdf(img_pdf)
+        img_pdf.close()
+
+    doc.save(output_path, deflate=True)
+    doc.close()
+    return output_path, len(image_paths)

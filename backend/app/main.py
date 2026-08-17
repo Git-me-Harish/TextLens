@@ -1,39 +1,50 @@
-import uuid
-import logging
+"""
+TextLens FastAPI application — Track 1 hardened.
 
+Changes from V1:
+  - Schema managed by Alembic — create_all removed from lifespan
+  - API versioned under /api/v1/
+  - structlog structured logging + RequestIDMiddleware
+  - MinIO bucket created on startup via storage_service.ensure_bucket()
+  - CORS locked to specific methods/headers (no wildcard in prod)
+"""
+
+import uuid
 from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# Route imports
+from app.api.routes import agents, auth, export, jobs, users
+from app.api.routes.admin import router as admin_router
+from app.api.routes.analytics import router as analytics_router
+from app.api.routes.apikeys import router as apikeys_router
+from app.api.routes.batch import router as batch_router
+from app.api.routes.chat import router as chat_router
+from app.api.routes.corrections import router as corrections_router
+from app.api.routes.drive import router as drive_router
+from app.api.routes.schedules import router as schedules_router
+from app.api.routes.search import router as search_router
+from app.api.routes.sse import router as sse_router
+from app.api.routes.studio import router as studio_router
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.database import engine
 from app.db.redis import close_redis
 from app.services import storage_service
 
-# Route imports 
-from app.api.routes import auth, jobs, users, agents, export
-from app.api.routes.sse import router as sse_router
-from app.api.routes.batch import router as batch_router
-from app.api.routes.apikeys import router as apikeys_router
-from app.api.routes.corrections import router as corrections_router
-from app.api.routes.chat import router as chat_router
-from app.api.routes.drive import router as drive_router
-from app.api.routes.schedules import router as schedules_router
-
-# Logging must be the first thing configured 
+# Logging must be the first thing configured
 setup_logging()
 logger = structlog.get_logger(__name__)
 
 
-# Request-ID middleware 
+# Request-ID middleware
 class RequestIDMiddleware(BaseHTTPMiddleware):
     """
     Reads X-Request-ID header (or generates a UUID) and:
@@ -41,6 +52,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
       2. Echoes it back in the response header.
     Every log line emitted during the request will carry request_id automatically.
     """
+
     async def dispatch(self, request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         structlog.contextvars.clear_contextvars()
@@ -50,7 +62,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# App lifespan 
+# App lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -66,6 +78,7 @@ async def lifespan(app: FastAPI):
     logger.info("textlens.startup", environment=settings.ENVIRONMENT)
 
     import os
+
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)  # temp dir for OCR workers
 
     await storage_service.ensure_bucket()
@@ -77,14 +90,14 @@ async def lifespan(app: FastAPI):
     logger.info("textlens.shutdown")
 
 
-# Rate limiter 
+# Rate limiter
 limiter = Limiter(
     key_func=get_remote_address,
     default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
 )
 
 
-# FastAPI application 
+# FastAPI application
 app = FastAPI(
     title="TextLens API",
     version="2.0.0",
@@ -99,7 +112,7 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
-# Middleware : order matters (outermost first) 
+# Middleware — order matters (outermost first)
 app.add_middleware(RequestIDMiddleware)
 
 # CORS: locked to known origins and an explicit method/header allowlist.
@@ -123,25 +136,28 @@ app.add_middleware(
 )
 
 
-# API v1 routers 
+# API v1 routers
 V1 = "/api/v1"
 
-app.include_router(auth.router,         prefix=V1)
-app.include_router(jobs.router,         prefix=V1)
-app.include_router(users.router,        prefix=V1)
-app.include_router(agents.router,       prefix=V1)
-app.include_router(export.router,       prefix=V1)
-app.include_router(batch_router,        prefix=V1)
-app.include_router(apikeys_router,      prefix=V1)
-app.include_router(corrections_router,  prefix=V1)
-app.include_router(chat_router,         prefix=V1)
-app.include_router(drive_router,        prefix=V1)
-app.include_router(schedules_router,    prefix=V1)
-app.include_router(sse_router,          prefix=V1)
+app.include_router(auth.router, prefix=V1)
+app.include_router(jobs.router, prefix=V1)
+app.include_router(users.router, prefix=V1)
+app.include_router(agents.router, prefix=V1)
+app.include_router(export.router, prefix=V1)
+app.include_router(batch_router, prefix=V1)
+app.include_router(apikeys_router, prefix=V1)
+app.include_router(corrections_router, prefix=V1)
+app.include_router(chat_router, prefix=V1)
+app.include_router(drive_router, prefix=V1)
+app.include_router(schedules_router, prefix=V1)
+app.include_router(sse_router, prefix=V1)
+app.include_router(analytics_router, prefix=V1)
+app.include_router(search_router, prefix=V1)
+app.include_router(admin_router, prefix=V1)
+app.include_router(studio_router, prefix=V1)
 
 
-# Health endpoints 
-
+# Health endpoints
 @app.get("/health", tags=["health"])
 async def health():
     return {"status": "ok", "version": "2.0.0", "environment": settings.ENVIRONMENT}
@@ -150,6 +166,7 @@ async def health():
 @app.get("/health/deps", tags=["health"])
 async def health_deps():
     from app.services.ocr_service import check_dependencies
+
     deps = check_dependencies()
     deps["ANTHROPIC_API_KEY_set"] = bool(settings.ANTHROPIC_API_KEY)
     deps["GROQ_API_KEY_set"] = bool(settings.GROQ_API_KEY)
@@ -167,9 +184,12 @@ async def health_deps():
 @app.get("/health/test-ocr", tags=["health"])
 async def test_ocr():
     import asyncio
+
     from app.services.ocr_service import process_job
+
     try:
         import fitz
+
         doc = fitz.open()
         page = doc.new_page()
         page.insert_text(
@@ -181,7 +201,9 @@ async def test_ocr():
         doc.save(tmp_path)
         doc.close()
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, process_job, "pdf_extract", tmp_path, {})
+        result = await loop.run_in_executor(
+            None, process_job, "pdf_extract", tmp_path, {}
+        )
         return {
             "status": "ok" if not result["error"] else "fail",
             "extracted_text": result.get("text", "")[:200],

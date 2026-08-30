@@ -23,6 +23,8 @@ import api, { errMsg } from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
 import { useAgent } from "../lib/AgentContext";
 import DrivePickerModal from "../components/DrivePickerModal";
+import ActionPanel from "../components/actions/ActionPanel";
+import ActionRunner from "../components/actions/ActionRunner";
 import { subscribeToSSE, waitForJobSSE } from "../hooks/useSSE";
 
 /*  Auto-classifier suggestion banner  */
@@ -231,6 +233,8 @@ export default function PipelinesPage() {
   const [classifying, setClassifying]     = useState(false);
   const [classifierResult, setClassifierResult] = useState(null);
   const [driveOpen, setDriveOpen]         = useState(false);
+  const [activeActionRunId, setActiveActionRunId] = useState(null);
+  const [activeActionLabel, setActiveActionLabel] = useState("Document action");
 
   //  Catalog fetch 
   useEffect(() => {
@@ -360,6 +364,7 @@ export default function PipelinesPage() {
     setStep(0); setOcrJob(null); setSelectedDomain(null);
     setSelectedPipeline(null); setAgentRun(null);
     setInstructions(""); setClassifierResult(null); clearAgent();
+    setActiveActionRunId(null); setActiveActionLabel("Document action");
   };
 
   const copyJSON = () => {
@@ -575,6 +580,29 @@ export default function PipelinesPage() {
               <div style={{ fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--ink-muted)", marginBottom: "0.5rem" }}>AI Summary</div>
               <p style={{ color: "var(--ink-secondary)", fontSize: "0.9rem", lineHeight: 1.6, marginBottom: "1rem" }}>{agentRun.summary}</p>
               <ConfidenceBar score={agentRun.confidence_score || 0} />
+            </div>
+          )}
+
+          {agentRun.status === "completed" && !activeActionRunId && (
+            <div className="card" style={{ padding: "1.25rem 1.5rem", marginBottom: "1.25rem" }}>
+              <ActionPanel
+                agentRunId={agentRun.id}
+                domain={agentRun.domain || selectedDomain}
+                onActionStarted={(actionRunId, actionLabel) => {
+                  setActiveActionRunId(actionRunId);
+                  setActiveActionLabel(actionLabel || "Document action");
+                }}
+              />
+            </div>
+          )}
+
+          {activeActionRunId && (
+            <div style={{ marginBottom: "1.25rem" }}>
+              <ActionRunner
+                actionRunId={activeActionRunId}
+                actionLabel={activeActionLabel}
+                onClose={() => setActiveActionRunId(null)}
+              />
             </div>
           )}
 

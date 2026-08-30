@@ -89,6 +89,33 @@ TESS_CONFIG_SPARSE = r"--oem 3 --psm 11"
 
 MIN_CHARS_PER_PAGE = 40  # below this → page is likely scanned, fall back to OCR
 
+try:
+    from app.core.config import settings
+
+    TESS_LANG = settings.TESSERACT_LANGUAGES
+except Exception:
+    # ocr_service.py is also exercised by scripts/tests that don't load full
+    # app settings — fall back to English-only rather than failing to import.
+    TESS_LANG = "eng"
+
+
+def _missing_tesseract_languages() -> list[str]:
+    """
+    Cross-checks TESS_LANG against what Tesseract actually has installed —
+    catches the case where TESSERACT_LANGUAGES is extended (e.g. to add
+    Tamil) without also updating the Dockerfile's language packages, which
+    would otherwise fail silently deep inside an OCR call instead of showing
+    up here at startup/health-check time.
+    """
+    if not (HAS_TESSERACT and TESSERACT_BINARY_OK):
+        return []
+    try:
+        installed = set(pytesseract.get_languages(config=""))
+    except Exception:
+        return []
+    wanted = set(TESS_LANG.split("+"))
+    return sorted(wanted - installed)
+
 
 def check_dependencies() -> dict:
     return {
@@ -97,6 +124,8 @@ def check_dependencies() -> dict:
         "Pillow": HAS_PIL,
         "OpenCV": HAS_CV2,
         "python-docx": HAS_DOCX,
+        "Tesseract languages configured": TESS_LANG,
+        "Tesseract languages missing": _missing_tesseract_languages(),
     }
 
 
@@ -190,8 +219,40 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 
 
 # Core OCR functions
-def ocr_image_file(image_path: str) -> str:
-    """OCR a single image file with preprocessing."""
+def _ocr_with_confidence(img: "Image.Image", config: str, lang: str) -> tuple[str, float | None]:
+    """
+    Run Tesseract via image_to_data (not image_to_string) so we get each
+    word's real per-token confidence from the OCR engine itself, and
+    aggregate to one score for the page/image.
+
+    This is a genuine OCR-engine confidence signal — distinct from, and not
+    to be confused with, the LLM's own self-reported "confidence" field in
+    the later structured-extraction step (agent_service.py). That one is an
+    LLM guessing a number about its own field extraction; this one is a
+    measurement Tesseract makes about how sure it is of the characters it saw.
+
+    Returns (text, mean_confidence_0_to_100). Confidence is None if no words
+    were recognized (Tesseract reports -1 confidence for non-text elements,
+    which are excluded from the average).
+    """
+    data = pytesseract.image_to_data(img, config=config, lang=lang, output_type=Output.DICT)
+    words = []
+    confidences = []
+    for text, conf in zip(data["text"], data["conf"]):
+        text = text.strip()
+        if not text:
+            continue
+        words.append(text)
+        conf = float(conf)
+        if conf >= 0:  # Tesseract uses -1 for non-text layout elements
+            confidences.append(conf)
+    full_text = " ".join(words)
+    mean_conf = round(sum(confidences) / len(confidences), 1) if confidences else None
+    return full_text, mean_conf
+
+
+def ocr_image_file(image_path: str) -> tuple[str, float | None]:
+    """OCR a single image file with preprocessing. Returns (text, ocr_confidence)."""
     if not HAS_TESSERACT or not TESSERACT_BINARY_OK:
         raise RuntimeError(
             "Tesseract not available. Install tesseract-ocr system package."
@@ -206,17 +267,16 @@ def ocr_image_file(image_path: str) -> str:
     results = []
     for config in [TESS_CONFIG, TESS_CONFIG_SINGLE, TESS_CONFIG_SPARSE]:
         try:
-            text = pytesseract.image_to_string(processed, config=config, lang="eng")
-            results.append(text)
+            results.append(_ocr_with_confidence(processed, config, TESS_LANG))
         except Exception:
             pass
 
     if not results:
         raise RuntimeError("Tesseract failed on this image.")
 
-    # Return longest result (most text extracted)
-    best = max(results, key=lambda t: len(t.strip()))
-    return best.strip()
+    # Keep the result with the most text extracted (same selection rule as before)
+    best_text, best_conf = max(results, key=lambda r: len(r[0].strip()))
+    return best_text.strip(), best_conf
 
 
 def _pdf_page_to_image(page) -> Image.Image:
@@ -227,12 +287,15 @@ def _pdf_page_to_image(page) -> Image.Image:
     return img
 
 
-def extract_pdf(pdf_path: str) -> tuple[str, int]:
+def extract_pdf(pdf_path: str) -> tuple[str, int, float | None]:
     """
     Smart PDF extraction:
-    - Try native text first (fast)
+    - Try native text first (fast) — no OCR confidence concept applies; it's exact
     - If page has <MIN_CHARS_PER_PAGE → render page and OCR it (scanned PDF)
-    Returns (full_text, page_count)
+    Returns (full_text, page_count, ocr_confidence).
+    ocr_confidence is the mean Tesseract confidence across only the pages
+    that were actually OCR'd (None if every page was native text, since
+    there's nothing for an OCR confidence to describe in that case).
     """
     if not HAS_FITZ:
         raise RuntimeError("PyMuPDF not installed. Run: pip install PyMuPDF")
@@ -240,6 +303,7 @@ def extract_pdf(pdf_path: str) -> tuple[str, int]:
     doc = fitz.open(pdf_path)
     page_texts = []
     ocr_pages = 0
+    page_confidences: list[float] = []
 
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
@@ -253,11 +317,11 @@ def extract_pdf(pdf_path: str) -> tuple[str, int]:
             img = _pdf_page_to_image(page)
             processed = preprocess_image(img)
             try:
-                ocr_text = pytesseract.image_to_string(
-                    processed, config=TESS_CONFIG, lang="eng"
-                )
+                ocr_text, page_conf = _ocr_with_confidence(processed, TESS_CONFIG, TESS_LANG)
                 page_texts.append(ocr_text.strip())
                 ocr_pages += 1
+                if page_conf is not None:
+                    page_confidences.append(page_conf)
             except Exception as e:
                 page_texts.append(f"[Page {page_num + 1} OCR failed: {e}]")
         else:
@@ -268,7 +332,8 @@ def extract_pdf(pdf_path: str) -> tuple[str, int]:
     doc.close()
     full_text = "\n\n--- Page Break ---\n\n".join(t for t in page_texts if t)
     note = f"\n\n[{ocr_pages} page(s) processed via OCR]" if ocr_pages else ""
-    return full_text + note, len(page_texts)
+    ocr_confidence = round(sum(page_confidences) / len(page_confidences), 1) if page_confidences else None
+    return full_text + note, len(page_texts), ocr_confidence
 
 
 def extract_pdf_sections(pdf_path: str) -> list[dict]:
@@ -393,6 +458,12 @@ def process_job(job_type: str, file_path: str, extra: dict = None) -> dict:
         "error": None,
         "page_count": None,
         "processing_time_ms": 0,
+        # Real Tesseract engine confidence (mean per-word, 0-100) — distinct
+        # from AgentRun.confidence_score, which is the LLM's own self-reported
+        # guess about its structured-field extraction. This one is grounded
+        # in what the OCR engine actually measured. None for job types that
+        # never touch Tesseract (native-text PDFs, non-OCR conversions).
+        "ocr_confidence": None,
     }
 
     try:
@@ -400,17 +471,21 @@ def process_job(job_type: str, file_path: str, extra: dict = None) -> dict:
             raise FileNotFoundError(f"File not found on disk: {file_path}")
 
         if job_type == "ocr_image":
-            result["text"] = ocr_image_file(file_path)
+            text, confidence = ocr_image_file(file_path)
+            result["text"] = text
+            result["ocr_confidence"] = confidence
 
         elif job_type == "pdf_extract":
-            text, pages = extract_pdf(file_path)
+            text, pages, confidence = extract_pdf(file_path)
             result["text"] = text or "(No text extracted)"
             result["page_count"] = pages
+            result["ocr_confidence"] = confidence
 
         elif job_type == "pdf_summarize":
-            text, pages = extract_pdf(file_path)
+            text, pages, confidence = extract_pdf(file_path)
             result["text"] = summarize_text(text, float(extra.get("ratio", 0.3)))
             result["page_count"] = pages
+            result["ocr_confidence"] = confidence
 
         elif job_type == "pdf_to_word":
             sections = extract_pdf_sections(file_path)
@@ -421,8 +496,9 @@ def process_job(job_type: str, file_path: str, extra: dict = None) -> dict:
             result["page_count"] = len(sections)
 
         elif job_type == "pdf_qa":
-            text, pages = extract_pdf(file_path)
+            text, pages, confidence = extract_pdf(file_path)
             result["text"] = answer_question(extra.get("question", ""), text)
+            result["ocr_confidence"] = confidence
             result["page_count"] = pages
 
         elif job_type == "pdf_to_markdown":

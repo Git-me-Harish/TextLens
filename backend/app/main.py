@@ -22,13 +22,18 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 # Route imports
 from app.api.routes import agents, auth, export, jobs, users
+from app.api.routes.actions import router as actions_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.analytics import router as analytics_router
 from app.api.routes.apikeys import router as apikeys_router
 from app.api.routes.batch import router as batch_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.corrections import router as corrections_router
+from app.api.routes.credentials import router as credentials_router
 from app.api.routes.drive import router as drive_router
+from app.api.routes.mcp_email import router as mcp_email_router
+from app.api.routes.mcp_google_calendar import router as mcp_google_calendar_router
+from app.api.routes.notifications import router as notifications_router
 from app.api.routes.schedules import router as schedules_router
 from app.api.routes.search import router as search_router
 from app.api.routes.sse import router as sse_router
@@ -150,11 +155,20 @@ app.include_router(corrections_router, prefix=V1)
 app.include_router(chat_router, prefix=V1)
 app.include_router(drive_router, prefix=V1)
 app.include_router(schedules_router, prefix=V1)
+app.include_router(notifications_router, prefix=V1)
 app.include_router(sse_router, prefix=V1)
 app.include_router(analytics_router, prefix=V1)
 app.include_router(search_router, prefix=V1)
 app.include_router(admin_router, prefix=V1)
 app.include_router(studio_router, prefix=V1)
+app.include_router(actions_router, prefix=f"{V1}/actions", tags=["Actions"])
+app.include_router(credentials_router, prefix=V1)
+
+# MCP proxies — internal service boundary, NOT under /api/v1: authenticated
+# by the forwarded external-service bearer token (see registry.py), not our
+# own user JWT.
+app.include_router(mcp_google_calendar_router)
+app.include_router(mcp_email_router)
 
 
 # Health endpoints

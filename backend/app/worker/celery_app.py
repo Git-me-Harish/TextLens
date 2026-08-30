@@ -26,7 +26,7 @@ celery_app = Celery(
     "textlens",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.worker.tasks"],
+    include=["app.worker.tasks", "app.worker.action_tasks"],
 )
 
 celery_app.conf.update(
@@ -53,6 +53,8 @@ celery_app.conf.update(
         "app.worker.tasks.retry_webhook_delivery": {"queue": "webhooks"},
         "app.worker.tasks.check_and_dispatch_schedules": {"queue": "default"},
         "app.worker.tasks.process_scheduled_batch": {"queue": "default"},
+        "action_tasks.execute_action": {"queue": settings.ACTION_CELERY_QUEUE},
+        "action_tasks.resume_action": {"queue": settings.ACTION_CELERY_QUEUE},
     },
 )
 

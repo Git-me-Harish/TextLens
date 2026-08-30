@@ -190,12 +190,19 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
         # something worth chunking/embedding, and ingesting it wasted API
         # calls. pdf_qa's result_text is a Q&A answer, not the document
         # either, so it's excluded too.
+        # Dispatched with no countdown — the job's status/result_text was
+        # already committed above, so it's visible to the DB immediately;
+        # no delay needed. A countdown here previously routed through
+        # Celery's timer/ETA scheduling path instead of immediate dispatch,
+        # which (reproduced live) executes the task against an asyncpg
+        # connection bound to a different event loop than the one
+        # _run_async() thinks is current — "attached to a different loop" —
+        # crashing ingest_document and, worse, corrupting the shared engine's
+        # connection pool badly enough that the NEXT unrelated task on this
+        # worker would then fail too ("another operation is in progress").
         _INGESTIBLE_JOB_TYPES = {"ocr_image", "pdf_extract", "pdf_summarize", "pdf_to_markdown"}
         if final_status == JobStatus.completed and ocr_result.get("text") and job_type in _INGESTIBLE_JOB_TYPES:
-            ingest_document.apply_async(
-                args=[job_id],
-                countdown=2,  # slight delay so DB commit is visible to the worker
-            )
+            ingest_document.delay(job_id)
             log.info("job.ingest_queued", job_id=job_id[:8])
 
         # 6b. Persist a notification + publish SSE event
@@ -690,13 +697,19 @@ async def _run_ingest(job_id: str) -> dict:
         for chunk, embedding in zip(chunks, embeddings):
             vec_str = vec_to_pg_str(embedding)
             await db.execute(
+                # CAST(:vec AS vector), not :vec::vector — SQLAlchemy's text()
+                # bind-parameter parser doesn't recognize a name immediately
+                # followed by a Postgres "::" cast, so :vec::vector rendered
+                # as literal unbound text and Postgres rejected it with a
+                # syntax error (reproduced live: every ingest ran, embedded,
+                # and then failed on this exact line).
                 _text("""
                     INSERT INTO document_chunks
                         (id, job_id, user_id, chunk_index, content, token_count,
                          embedding, ts_vector, chunk_metadata, created_at)
                     VALUES
                         (:id, :job_id, :user_id, :chunk_index, :content, :token_count,
-                         :vec::vector,
+                         CAST(:vec AS vector),
                          to_tsvector('english', :content),
                          :metadata, NOW())
                 """),

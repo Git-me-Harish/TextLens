@@ -121,6 +121,10 @@ async def _owned_job_or_404(db: AsyncSession, job_id: str, user_id: str) -> OCRJ
 async def upload_file(
     file: UploadFile = File(...),
     job_type: str = Form(...),
+    ratio: float | None = Form(
+        None, ge=0.05, le=0.9,
+        description="pdf_summarize only — fraction of sentences to keep (e.g. 0.15 for a short executive summary, 0.5 for detailed). Ignored by every other job_type.",
+    ),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -200,7 +204,8 @@ async def upload_file(
     await db.flush()
     await db.refresh(job)
 
-    process_ocr_job.delay(job.id)
+    extra_data = {"ratio": ratio} if job_type == JobType.pdf_summarize.value and ratio is not None else None
+    process_ocr_job.delay(job.id, extra_data)
     logger.info("job.queued", job_id=job.id[:8], job_type=job_type, size_bytes=len(content))
     return job
 

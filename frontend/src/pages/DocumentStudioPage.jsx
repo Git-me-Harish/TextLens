@@ -517,7 +517,7 @@ export default function DocumentStudioPage() {
         )}
       </div>
       {pageCount > 1 && (
-        <div style={{ textAlign: "center", fontSize: "0.72rem", color: "var(--ink-muted)", marginTop: "-1rem", marginBottom: "1.5rem" }}>
+        <div style={{ textAlign: "center", fontSize: "0.75rem", fontWeight: 600, color: "var(--ink-muted)", marginTop: "0.625rem", marginBottom: "1.5rem" }}>
           Page {page + 1} of {pageCount}
         </div>
       )}

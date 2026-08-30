@@ -53,6 +53,16 @@ from app.worker.celery_app import celery_app
     max_retries=2,
     default_retry_delay=30,
     queue="ocr",
+    # Bounds worst-case worker-slot lockup from a pathological file (huge
+    # page count, a Tesseract hang on a corrupted image, etc.) — every other
+    # task family in this codebase sets one of these; this one never had it.
+    # Generous enough for a large multi-page scanned PDF at 300dpi with
+    # multiple PSM passes per page (see ocr_service.py's ocr_image_file).
+    # NB: the per-task decorator kwargs are time_limit/soft_time_limit —
+    # NOT task_time_limit/task_soft_time_limit (that prefixed form is only
+    # for celery_app.conf.update(), and silently does nothing here).
+    time_limit=600,
+    soft_time_limit=540,
 )
 def process_ocr_job(self, job_id: str, extra_data: dict | None = None) -> dict:
     """
@@ -75,6 +85,7 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
     from app.db.database import AsyncSessionLocal
     from app.models.models import JobStatus, OCRJob, User, WebhookEvent
     from app.services import storage_service
+    from app.services.notification_service import create_notification, format_job_notification
     from app.services.ocr_service import process_job
     from app.services.webhook_service import fire_webhook
 
@@ -167,19 +178,37 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
                 job.error_message = ocr_result.get("error")
                 job.page_count = ocr_result.get("page_count")
                 job.processing_time_ms = ocr_result.get("processing_time_ms")
+                job.ocr_confidence = ocr_result.get("ocr_confidence")
                 job.completed_at = datetime.utcnow()
                 await db.commit()
                 log.info("job.saved", status=job.status.value)
 
-        # 6a. Trigger RAG ingestion if text was extracted
-        if final_status == JobStatus.completed and ocr_result.get("text"):
+        # 6a. Trigger RAG ingestion — only for job types whose result_text is
+        # genuine document content. Document Studio operations (split, merge,
+        # compress, images→PDF, pdf→word) set result_text to a short status
+        # string like "Extracted pages 2–3 (2 page(s))" — truthy, but not
+        # something worth chunking/embedding, and ingesting it wasted API
+        # calls. pdf_qa's result_text is a Q&A answer, not the document
+        # either, so it's excluded too.
+        _INGESTIBLE_JOB_TYPES = {"ocr_image", "pdf_extract", "pdf_summarize", "pdf_to_markdown"}
+        if final_status == JobStatus.completed and ocr_result.get("text") and job_type in _INGESTIBLE_JOB_TYPES:
             ingest_document.apply_async(
                 args=[job_id],
                 countdown=2,  # slight delay so DB commit is visible to the worker
             )
             log.info("job.ingest_queued", job_id=job_id[:8])
 
-        # 6b. Publish SSE event (sync — safe here)
+        # 6b. Persist a notification + publish SSE event
+        title, message = format_job_notification(
+            final_status.value, job_type, original_filename, ocr_result.get("error")
+        )
+        async with AsyncSessionLocal() as db:
+            notif = await create_notification(
+                db, user_id, type="job", status=final_status.value,
+                title=title, message=message, link="/history",
+                entity_type="ocr_job", entity_id=job_id,
+            )
+
         _publish_sse(
             user_id,
             "job_update",
@@ -192,6 +221,7 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
                 "processing_time_ms": ocr_result.get("processing_time_ms"),
                 "result_file_path": result_key,
                 "error_message": ocr_result.get("error"),
+                "notification": notif,
             },
         )
 
@@ -240,6 +270,17 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
                     job.completed_at = datetime.utcnow()
                     await db.commit()
             # Still push SSE failure so UI stops spinning
+            # Deliberately doesn't reference original_filename — this crash
+            # handler can run before that variable is ever assigned (e.g. the
+            # job lookup itself failed), so a generic phrase avoids a NameError
+            # inside an already-failing exception handler.
+            async with AsyncSessionLocal() as notif_db:
+                notif = await create_notification(
+                    notif_db, user_id, type="job", status="failed",
+                    title="Extraction failed",
+                    message=f"Job {job_id[:8]} could not be processed: {str(exc)[:200]}",
+                    link="/history", entity_type="ocr_job", entity_id=job_id,
+                )
             _publish_sse(
                 user_id,
                 "job_update",
@@ -247,6 +288,7 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
                     "job_id": job_id,
                     "status": "failed",
                     "error_message": str(exc),
+                    "notification": notif,
                 },
             )
         except Exception:
@@ -301,6 +343,7 @@ async def _run_agent(
     from app.db.database import AsyncSessionLocal
     from app.models.models import AgentRun, AgentStatus, User, WebhookEvent
     from app.services.agent_service import run_agent
+    from app.services.notification_service import create_notification, format_agent_notification
     from app.services.webhook_service import fire_webhook
 
     log = logger.bind(
@@ -340,7 +383,18 @@ async def _run_agent(
         if not user_id:
             return {"run_id": run_id, "status": "skipped_no_run"}
 
-        # Publish SSE event
+        # Persist a notification, then publish SSE event
+        title, message = format_agent_notification(
+            final_status.value, domain, pipeline_type,
+            original_filename or "document", result.get("error"),
+        )
+        async with AsyncSessionLocal() as notif_db:
+            notif = await create_notification(
+                notif_db, user_id, type="agent", status=final_status.value,
+                title=title, message=message, link="/agent-history",
+                entity_type="agent_run", entity_id=run_id,
+            )
+
         _publish_sse(
             user_id,
             "agent_update",
@@ -353,6 +407,7 @@ async def _run_agent(
                 "confidence_score": result.get("confidence"),
                 "processing_time_ms": result.get("processing_time_ms"),
                 "error_message": result.get("error"),
+                "notification": notif,
             },
         )
 
@@ -398,6 +453,13 @@ async def _run_agent(
                     run.error_message = f"{type(exc).__name__}: {exc}"
                     run.completed_at = datetime.utcnow()
                     await db.commit()
+                    async with AsyncSessionLocal() as notif_db:
+                        notif = await create_notification(
+                            notif_db, run.user_id, type="agent", status="failed",
+                            title="Pipeline run failed",
+                            message=f"Run {run_id[:8]} could not be completed: {str(exc)[:200]}",
+                            link="/agent-history", entity_type="agent_run", entity_id=run_id,
+                        )
                     _publish_sse(
                         run.user_id,
                         "agent_update",
@@ -405,6 +467,7 @@ async def _run_agent(
                             "run_id": run_id,
                             "status": "failed",
                             "error_message": str(exc),
+                            "notification": notif,
                         },
                     )
         except Exception:

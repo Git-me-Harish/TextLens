@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     String, Boolean, DateTime, Text, Integer,
-    ForeignKey, Enum as SAEnum, JSON, BigInteger,
+    ForeignKey, Enum as SAEnum, JSON, BigInteger, Float,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB, TSVECTOR
@@ -37,12 +37,23 @@ class JobStatus(str, enum.Enum):
 
 
 class JobType(str, enum.Enum):
-    ocr_image    = "ocr_image"
-    pdf_extract  = "pdf_extract"
+    ocr_image     = "ocr_image"
+    pdf_extract   = "pdf_extract"
     pdf_summarize = "pdf_summarize"
-    pdf_qa       = "pdf_qa"
-    pdf_to_word  = "pdf_to_word"
-    image_to_pdf = "image_to_pdf"
+    pdf_qa        = "pdf_qa"
+    pdf_to_word   = "pdf_to_word"
+    image_to_pdf  = "image_to_pdf"
+    # Document Studio types — DB enum extended in migration 004, but this
+    # Python class was never updated to match, so studio.py's JobType.pdf_merge
+    # / JobType.images_to_pdf raised AttributeError and jobs.py's
+    # _validate_job_type() rejected pdf_to_markdown/pdf_compress with a 400
+    # before they ever reached the worker. Adding the missing members here.
+    pdf_to_markdown = "pdf_to_markdown"
+    pdf_merge       = "pdf_merge"
+    pdf_split       = "pdf_split"
+    pdf_compress    = "pdf_compress"
+    images_to_pdf   = "images_to_pdf"
+    pdf_edit        = "pdf_edit"
 
 
 class AgentStatus(str, enum.Enum):
@@ -101,6 +112,7 @@ class User(Base):
     api_keys: Mapped[list["APIKey"]] = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
     webhooks: Mapped[list["Webhook"]] = relationship("Webhook", back_populates="user", cascade="all, delete-orphan")
     audit_logs: Mapped[list["AuditLog"]] = relationship("AuditLog", back_populates="user")
+    notifications: Mapped[list["Notification"]] = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
 
 
 class OCRJob(Base):
@@ -117,6 +129,10 @@ class OCRJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     processing_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Real Tesseract engine confidence (mean per-word, 0-100) — see
+    # ocr_service.py's _ocr_with_confidence. Null for jobs that never ran
+    # OCR (native-text PDFs, non-OCR conversions).
+    ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # SHA-256 hex
     # batch linkage — null for standalone jobs
     batch_item_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("batch_items.id", ondelete="SET NULL"), nullable=True)
@@ -277,6 +293,33 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     user: Mapped["User"] = relationship("User", back_populates="audit_logs")
+
+
+class Notification(Base):
+    """
+    User-facing notification feed — distinct from AuditLog (an append-only
+    audit trail with no read state, not meant for direct display). Created
+    by notification_service.py alongside the existing job_update/agent_update/
+    action_update SSE pushes (see worker/tasks.py, worker/action_tasks.py) so
+    the same event both pops a live toast and persists into this list for
+    later viewing (dashboard panel, bell dropdown).
+    """
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    type: Mapped[str] = mapped_column(String(32))  # "job" | "agent" | "action"
+    status: Mapped[str] = mapped_column(String(16))  # "completed" | "failed" | "awaiting_approval"
+    title: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Frontend route to navigate to on click — e.g. "/history", "/agent-history", "/actions/history"
+    link: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    entity_type: Mapped[str | None] = mapped_column(String(32), nullable=True)  # "ocr_job" | "agent_run" | "action_run"
+    entity_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    user: Mapped["User"] = relationship("User", back_populates="notifications")
 
 
 # Corrections 

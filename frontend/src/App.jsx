@@ -18,7 +18,9 @@ import HistoryPage        from "./pages/HistoryPage";
 import ProfilePage        from "./pages/ProfilePage";
 import PipelinesPage      from "./pages/PipelinesPage";
 import AgentHistoryPage   from "./pages/AgentHistoryPage";
+import ActionHistoryPage  from "./pages/ActionHistoryPage";
 import ApiKeysPage        from "./pages/ApiKeysPage";
+import CredentialsSettingsPage from "./pages/CredentialsSettingsPage";
 import BatchPage          from "./pages/BatchPage";
 import SchedulesPage      from "./pages/SchedulesPage";
 
@@ -69,7 +71,9 @@ export default function App() {
               <Route path="/profile"         element={<PL><ProfilePage /></PL>} />
               <Route path="/pipelines"       element={<PL><PipelinesPage /></PL>} />
               <Route path="/agent-history"   element={<PL><AgentHistoryPage /></PL>} />
+              <Route path="/actions/history" element={<PL><ActionHistoryPage /></PL>} />
               <Route path="/api-keys"        element={<PL><ApiKeysPage /></PL>} />
+              <Route path="/settings/integrations" element={<PL><CredentialsSettingsPage /></PL>} />
               <Route path="/webhooks"        element={<PL><ApiKeysPage /></PL>} />
               <Route path="/batch"           element={<PL><BatchPage /></PL>} />
               <Route path="/schedules"       element={<PL><SchedulesPage /></PL>} />

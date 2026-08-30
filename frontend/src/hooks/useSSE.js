@@ -76,12 +76,31 @@ export default function useSSE() {
         _dispatch("agent_update", data);
       });
 
-      // batch_update 
+      // batch_update
       es.addEventListener("batch_update", (e) => {
         const data = JSON.parse(e.data);
         // Invalidate the batch list — BatchPage will refetch
         queryClient.invalidateQueries({ queryKey: ["batches"] });
         _dispatch("batch_update", data);
+      });
+
+      // action_update — agentic action layer (completed/failed/awaiting_approval)
+      es.addEventListener("action_update", (e) => {
+        const data = JSON.parse(e.data);
+        queryClient.invalidateQueries({ queryKey: ["action-runs"] });
+        _dispatch("action_update", data);
+      });
+
+      // Any terminal event carrying an embedded `notification` payload also
+      // feeds the global notification center (bell dropdown + dashboard panel).
+      ["job_update", "agent_update", "action_update"].forEach((type) => {
+        es.addEventListener(type, (e) => {
+          const data = JSON.parse(e.data);
+          if (data.notification) {
+            queryClient.invalidateQueries({ queryKey: ["notifications"] });
+            _dispatch("notification", data.notification);
+          }
+        });
       });
 
       // heartbeat — just reset the retry delay 

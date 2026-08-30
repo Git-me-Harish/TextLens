@@ -3,12 +3,20 @@ import { Link } from "react-router-dom";
 import { useAuth } from "../lib/AuthContext";
 import api from "../lib/api";
 import { Badge, Spinner } from "../components/ui";
+import { subscribeToSSE } from "../hooks/useSSE";
 import { formatDistanceToNow } from "date-fns";
 import {
-  ArrowUpRight, FileText, Cpu, Activity, Zap,
+  ArrowUpRight, FileText, Cpu, Activity, Zap, Bell,
   TrendingUp, HeartPulse, Scale, Truck, GraduationCap,
   Building2, LayoutDashboard, Layers, MessageSquare,
+  ClipboardCheck, CheckCheck, AlertCircle, Clock3,
 } from "lucide-react";
+
+const NOTIF_STATUS_META = {
+  completed: { color: "var(--success)", Icon: CheckCheck },
+  failed: { color: "var(--danger)", Icon: AlertCircle },
+  awaiting_approval: { color: "var(--warning)", Icon: Clock3 },
+};
 
 const STATUS_BADGE = { completed: "success", failed: "danger", processing: "processing", pending: "warning" };
 
@@ -110,18 +118,40 @@ export default function DashboardPage() {
   const [stats, setStats] = useState(null);
   const [recentJobs, setRecentJobs] = useState([]);
   const [recentAgents, setRecentAgents] = useState([]);
+  const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [actionRunCount, setActionRunCount] = useState(0);
+  const [integrations, setIntegrations] = useState([]);
+  const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const load = () => {
     Promise.all([
       api.get("/users/me/stats"),
       api.get("/jobs?per_page=50"),
       api.get("/agents?per_page=20"),
-    ]).then(([s, j, a]) => {
+      api.get("/actions/?limit=100"),
+      api.get("/actions/?status=AWAITING_APPROVAL&limit=5"),
+      api.get("/credentials/"),
+      api.get("/notifications?limit=6"),
+    ]).then(([s, j, a, allActions, pending, creds, notifs]) => {
       setStats(s.data);
       setRecentJobs(j.data.jobs || []);
       setRecentAgents(a.data.runs || []);
+      setActionRunCount(allActions.data.length || 0);
+      setPendingApprovals(pending.data || []);
+      setIntegrations(creds.data || []);
+      setNotifications(notifs.data.notifications || []);
     }).finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    load();
+    // Live reactivity: any terminal event on any of these channels means
+    // the widgets above are stale — pull a fresh snapshot rather than
+    // reimplementing per-event patching for a page this summary-oriented.
+    const unsubs = ["job_update", "agent_update", "action_update", "notification"]
+      .map((key) => subscribeToSSE(key, load));
+    return () => unsubs.forEach((u) => u());
   }, []);
 
   const successRate = stats?.total_jobs
@@ -141,7 +171,7 @@ export default function DashboardPage() {
       </div>
       {loading ? (
         <div className="stats-row" style={{ marginBottom: "1.75rem" }}>
-          {[1,2,3,4].map(i => <div key={i} className="stat-card skeleton" style={{ height: 88 }} />)}
+          {[1,2,3,4,5,6].map(i => <div key={i} className="stat-card skeleton" style={{ height: 88 }} />)}
         </div>
       ) : (
         <div className="stats-row" style={{ marginBottom: "1.75rem" }}>
@@ -154,15 +184,29 @@ export default function DashboardPage() {
             <div className="stat-label">Agent runs</div>
           </div>
           <div className="stat-card">
+            <div className="stat-value">{actionRunCount}</div>
+            <div className="stat-label">Actions run</div>
+          </div>
+          <div className="stat-card">
             <div className="stat-value" style={{ color: successRate >= 80 ? "var(--success)" : successRate >= 50 ? "var(--warning)" : "var(--danger)" }}>
               {successRate}%
             </div>
             <div className="stat-label">Success rate</div>
           </div>
-          <div className="stat-card">
-            <div className="stat-value">{stats?.failed_jobs ?? 0}</div>
-            <div className="stat-label">Failed jobs</div>
-          </div>
+          <Link to="/actions/history" style={{ textDecoration: "none" }}>
+            <div className="stat-card" style={{ cursor: "pointer" }}>
+              <div className="stat-value" style={{ color: pendingApprovals.length > 0 ? "var(--warning)" : "var(--ink)" }}>
+                {pendingApprovals.length}
+              </div>
+              <div className="stat-label">Pending approvals</div>
+            </div>
+          </Link>
+          <Link to="/settings/integrations" style={{ textDecoration: "none" }}>
+            <div className="stat-card" style={{ cursor: "pointer" }}>
+              <div className="stat-value">{integrations.length}</div>
+              <div className="stat-label">Connected integrations</div>
+            </div>
+          </Link>
         </div>
       )}
       <div style={{ marginBottom: "1.75rem" }}>
@@ -170,7 +214,7 @@ export default function DashboardPage() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: "0.75rem" }}>
           <QuickAction to="/pipelines" icon={Zap} label="Run Pipeline" desc="Upload + run domain agent" accent="var(--accent)" />
           <QuickAction to="/tools/pdf-extract" icon={FileText} label="Quick Extract" desc="Raw PDF/image text extraction" accent="#16a34a" />
-          <QuickAction to="/tools/pdf-chat" icon={MessageSquare} label="PDF Chat" desc="Ask questions about a doc" accent="#9333ea" />
+          <QuickAction to="/tools/pdf-chat" icon={MessageSquare} label="PDF Chat" desc="Ask questions about a document" accent="#9333ea" />
           <QuickAction to="/batch" icon={Layers} label="Batch Jobs" desc="Process multiple types of files" accent="#d97706" />
         </div>
       </div>
@@ -191,6 +235,102 @@ export default function DashboardPage() {
           {loading ? <div className="skeleton" style={{ height: 80 }} /> : <DomainBreakdown runs={recentAgents} />}
         </div>
       </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem", marginBottom: "1.5rem" }}>
+        <div className="card" style={{ overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)" }}>
+            <ClipboardCheck size={15} style={{ color: "var(--warning)" }} />
+            <span style={{ fontWeight: 600, fontSize: "0.875rem" }}>Pending approvals</span>
+          </div>
+          {loading ? (
+            <div style={{ padding: "1rem", display: "flex", flexDirection: "column", gap: 8 }}>
+              {[1,2].map(i => <div key={i} className="skeleton" style={{ height: 36 }} />)}
+            </div>
+          ) : pendingApprovals.length === 0 ? (
+            <div style={{ padding: "2rem", textAlign: "center", color: "var(--ink-muted)", fontSize: "0.83rem" }}>
+              Nothing waiting on you
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              {pendingApprovals.map((run, i) => {
+                const meta = DOMAIN_META[run.domain] || DOMAIN_META.general;
+                const Icon = meta.icon;
+                return (
+                  <Link
+                    key={run.id}
+                    to="/actions/history"
+                    style={{
+                      display: "flex", alignItems: "center", gap: 10, padding: "0.625rem 1.25rem",
+                      textDecoration: "none", color: "inherit",
+                      borderBottom: i < pendingApprovals.length - 1 ? "1px solid var(--border)" : "none",
+                    }}
+                  >
+                    <div style={{ width: 28, height: 28, borderRadius: 8, background: `${meta.color}18`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Icon size={13} style={{ color: meta.color }} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: "0.82rem", fontWeight: 500, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {run.action_type?.replace(/_/g, " ")}
+                      </div>
+                      <div style={{ fontSize: "0.72rem", color: "var(--ink-muted)" }}>Expires soon — review the plan</div>
+                    </div>
+                    <Badge variant="warning">Awaiting you</Badge>
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="card" style={{ overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Bell size={15} style={{ color: "var(--accent)" }} />
+              <span style={{ fontWeight: 600, fontSize: "0.875rem" }}>Recent notifications</span>
+            </div>
+          </div>
+          {loading ? (
+            <div style={{ padding: "1rem", display: "flex", flexDirection: "column", gap: 8 }}>
+              {[1,2,3].map(i => <div key={i} className="skeleton" style={{ height: 36 }} />)}
+            </div>
+          ) : notifications.length === 0 ? (
+            <div style={{ padding: "2rem", textAlign: "center", color: "var(--ink-muted)", fontSize: "0.83rem" }}>
+              Nothing yet — run an extraction or pipeline to see updates here
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              {notifications.map((notif, i) => {
+                const meta = NOTIF_STATUS_META[notif.status] || NOTIF_STATUS_META.completed;
+                const { Icon } = meta;
+                const inner = (
+                  <>
+                    <Icon size={14} style={{ color: meta.color, flexShrink: 0, marginTop: 1 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: "0.8rem", fontWeight: notif.is_read ? 500 : 700, color: "var(--ink)" }}>
+                        {notif.title}
+                      </div>
+                      <div style={{ fontSize: "0.72rem", color: "var(--ink-muted)", marginTop: 2 }}>
+                        {formatDistanceToNow(new Date(notif.created_at), { addSuffix: true })}
+                      </div>
+                    </div>
+                  </>
+                );
+                const rowStyle = {
+                  display: "flex", gap: 10, padding: "0.625rem 1.25rem",
+                  textDecoration: "none", color: "inherit",
+                  borderBottom: i < notifications.length - 1 ? "1px solid var(--border)" : "none",
+                };
+                return notif.link ? (
+                  <Link key={notif.id} to={notif.link} style={rowStyle}>{inner}</Link>
+                ) : (
+                  <div key={notif.id} style={rowStyle}>{inner}</div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem" }}>
         <div className="card" style={{ overflow: "hidden" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)" }}>

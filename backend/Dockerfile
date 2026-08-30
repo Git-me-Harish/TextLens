@@ -1,9 +1,14 @@
 FROM python:3.11-slim
 
 # Install system deps for OCR
+# Language packs here must match settings.TESSERACT_LANGUAGES (config.py) —
+# add more (tesseract-ocr-tam, -tel, -kan, -mal, -ben, -mar, -guj, -pan, ...)
+# and extend TESSERACT_LANGUAGES together; each unlisted language silently
+# fails to load if referenced without its package installed.
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
+    tesseract-ocr-hin \
     libglib2.0-0 \
     libsm6 \
     libxext6 \

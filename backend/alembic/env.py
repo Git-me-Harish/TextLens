@@ -16,6 +16,7 @@ from alembic import context
 # Import Base + all models so their metadata is registered.
 from app.db.database import Base
 import app.models.models  # noqa: F401
+import app.models.action_models  # noqa: F401
 
 from app.core.config import settings
 

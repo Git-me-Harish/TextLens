@@ -3,9 +3,11 @@ fastapi
 uvicorn[standard]
 python-multipart
 slowapi
+anthropic>=0.40.0
 
 # Auth 
 python-jose[cryptography]
+PyJWT>=2.9.0
 passlib[bcrypt]
 bcrypt==4.0.1
 authlib
@@ -39,18 +41,23 @@ resend            # Resend API client — free tier 3,000 emails/month
 structlog         # structured logging (JSON in prod, coloured in dev)
  
 # HTTP client 
-httpx
+httpx>=0.27.0
 
 # Settings 
 pydantic
 pydantic-settings
 python-dotenv
 
-# OCR engines 
+# OCR engines
 PyMuPDF
 pytesseract
 Pillow
 PyPDF2
+# Powers ocr_service.py's preprocessing pipeline (deskew, denoise, adaptive
+# threshold) — without this, HAS_CV2 is False and every document silently
+# falls back to the much weaker PIL-only path with no warning anywhere.
+# -headless: no GUI bindings needed in a server/container environment.
+opencv-python-headless
 
 # Document export 
 python-docx
@@ -65,6 +72,7 @@ unidecode
 # Utilities 
 aiofiles
 email-validator
+cryptography>=43.0.0
 
 # NLP
 spacy

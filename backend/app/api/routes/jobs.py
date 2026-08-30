@@ -77,6 +77,29 @@ def _allowed(content_type: str, job_type: str) -> bool:
     return content_type == ALLOWED_PDF_TYPE
 
 
+def _sniff_content_type(content: bytes) -> str | None:
+    """
+    Identify a file's real type from its magic bytes, independent of the
+    client-declared Content-Type header or filename extension — both of
+    which are trivially spoofable (rename a .exe to .pdf, set the header
+    by hand). Only distinguishes the handful of formats this app actually
+    accepts; returns None for anything else, including no signature match.
+    """
+    if content.startswith(b"%PDF-"):
+        return "application/pdf"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff"
+    if content.startswith(b"BM"):
+        return "image/bmp"
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _validate_job_type(job_type: str) -> None:
     valid = [jt.value for jt in JobType]
     if job_type not in valid:
@@ -127,6 +150,19 @@ async def upload_file(
     max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
     if len(content) > max_bytes:
         raise HTTPException(status_code=413, detail=f"File exceeds {settings.MAX_FILE_SIZE_MB} MB limit.")
+
+    # Verify the file's actual bytes, not just the client-declared header/extension —
+    # both of those are spoofable and this content gets handed to PyMuPDF/Tesseract next.
+    sniffed_type = _sniff_content_type(content)
+    if sniffed_type is None or not _allowed(sniffed_type, job_type):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"File content does not match an allowed {'image' if job_type == JobType.ocr_image.value else 'PDF'} "
+                f"format. The file's actual bytes were checked, not just its name or declared type."
+            ),
+        )
+    content_type = sniffed_type  # trust the sniffed type from here on, not the client header
 
     file_hash = hashlib.sha256(content).hexdigest()
 

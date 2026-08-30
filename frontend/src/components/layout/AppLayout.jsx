@@ -5,10 +5,11 @@ import {
   FileText, Cpu, ClipboardList, ChevronDown, ChevronRight,
   Layers, Key, Webhook, ShieldCheck, Zap, Upload,
   HeartPulse, Scale, Truck, GraduationCap, Building2, FileSearch,
-  TrendingUp, MessageSquare, CalendarClock,
+  TrendingUp, MessageSquare, CalendarClock, Briefcase,
 } from "lucide-react";
 import { useAuth } from "../../lib/AuthContext";
 import { useAgent } from "../../lib/AgentContext";
+import NotificationCenter from "../notifications/NotificationCenter";
 
 /* ─────────────────────────────── nav config ──────────────────────── */
 
@@ -37,7 +38,8 @@ const NAV = [
       { label: "Healthcare",       icon: HeartPulse,    to: "/pipelines?domain=healthcare" },
       { label: "Legal",            icon: Scale,         to: "/pipelines?domain=legal" },
       { label: "Logistics",        icon: Truck,         to: "/pipelines?domain=logistics" },
-      { label: "HR & Education",   icon: GraduationCap, to: "/pipelines?domain=hr" },
+      { label: "Career",           icon: Briefcase,     to: "/pipelines?domain=hr" },
+      { label: "Education",        icon: GraduationCap, to: "/pipelines?domain=education" },
       { label: "Government",       icon: Building2,     to: "/pipelines?domain=government" },
       { label: "All Pipelines",    icon: Cpu,           to: "/pipelines" },
     ],
@@ -47,6 +49,7 @@ const NAV = [
     items: [
       { label: "Run Agent",         icon: Cpu,          to: "/pipelines" },
       { label: "Agent History",     icon: ClipboardList,to: "/agent-history" },
+      { label: "Action History",    icon: Zap,          to: "/actions/history" },
     ],
   },
   {
@@ -66,6 +69,7 @@ const NAV = [
     label: "API",
     items: [
       { label: "API Keys",          icon: Key,          to: "/api-keys" },
+      { label: "Integrations",      icon: ShieldCheck,  to: "/settings/integrations" },
       { label: "Webhooks",          icon: Webhook,      to: "/webhooks" },
     ],
   },
@@ -312,13 +316,20 @@ export default function AppLayout({ children }) {
           >
             Text<span style={{ color: "var(--accent)" }}>Lens</span>
           </div>
-          <button
-            onClick={() => setMobileOpen(true)}
-            style={{ background: "none", border: "none", cursor: "pointer" }}
-          >
-            <Menu size={21} />
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <NotificationCenter />
+            <button
+              onClick={() => setMobileOpen(true)}
+              style={{ background: "none", border: "none", cursor: "pointer" }}
+            >
+              <Menu size={21} />
+            </button>
+          </div>
         </header>
+
+        <div className="desktop-topbar">
+          <NotificationCenter />
+        </div>
 
         <main className="main-content fade-in">{children}</main>
       </div>

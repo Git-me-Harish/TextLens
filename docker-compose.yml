@@ -11,6 +11,15 @@ x-backend-env: &backend-env
   MINIO_BUCKET: textlens
   # Voyage AI : set this to enable RAG chat (free 200M tokens/month)
   VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+  AGENT_MODEL: ${AGENT_MODEL:-claude-sonnet-4-20250514}
+  MCP_ENCRYPTION_KEY: ${MCP_ENCRYPTION_KEY:-}
+  MCP_KEY_VERSION: ${MCP_KEY_VERSION:-1}
+  APPROVAL_TOKEN_TTL_MINUTES: ${APPROVAL_TOKEN_TTL_MINUTES:-15}
+  INTERNAL_MCP_SHARED_SECRET: ${INTERNAL_MCP_SHARED_SECRET:-}
+  # Implemented locally on the backend service itself (app/api/routes/mcp_google_calendar.py,
+  # mcp_email.py) — "backend" here is this compose file's service DNS name, not localhost.
+  GOOGLE_CALENDAR_MCP_URL: ${GOOGLE_CALENDAR_MCP_URL:-http://backend:8000/mcp/google-calendar}
+  EMAIL_MCP_URL: ${EMAIL_MCP_URL:-http://backend:8000/mcp/email}
 
 services:
 
@@ -90,6 +99,30 @@ services:
     environment:
       <<: *backend-env
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4 -Q default,ocr,agents,ingest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  celery-actions:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      <<: *backend-env
+    command: >
+      celery -A app.worker.celery_app worker
+      --queues=actions
+      --concurrency=4
+      --loglevel=info
+      --max-tasks-per-child=50
+      --time-limit=330
+      --soft-time-limit=310
     depends_on:
       postgres:
         condition: service_healthy

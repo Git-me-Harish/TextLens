@@ -375,7 +375,7 @@ Return ONLY valid JSON:
 }""",
     },
 
-    # ── HR & EDUCATION ───────────────────────────────────────────────
+    # ── CAREER & RECRUITMENT ──────────────────────────────────────────
     "hr": {
         "resume_parser": """You are an HR specialist and ATS expert. Parse resume data into structured format.
 Return ONLY valid JSON:
@@ -402,7 +402,16 @@ Return ONLY valid JSON:
   "confidence": number between 0-100,
   "summary": "candidate summary in 2-3 sentences highlighting key strengths"
 }""",
+    },
 
+    # ── EDUCATION & KNOWLEDGE ─────────────────────────────────────────
+    # Split out from "hr" — these are academic records (idea.md's Education
+    # domain), not career documents. Previously bundled under "hr" as
+    # "HR & Education", which meant AgentRun.domain could never actually be
+    # "education" (get_pipeline_catalog() is the source of truth POST
+    # /agents/run validates against), so the education_agent.py action layer
+    # built for this domain was unreachable dead code until this split.
+    "education": {
         "certificate_verifier": """You are a credential verification specialist. Extract certificate details.
 Return ONLY valid JSON:
 {
@@ -525,7 +534,7 @@ Return ONLY valid JSON:
 Analyze the document text and determine the most appropriate processing pipeline.
 Return ONLY valid JSON:
 {
-  "detected_domain": "finance|healthcare|legal|logistics|hr|government|general",
+  "detected_domain": "finance|healthcare|legal|logistics|hr|education|government|general",
   "detected_pipeline": "the most specific pipeline key that matches this document",
   "confidence": number between 0-100,
   "reasoning": "one sentence explaining the classification decision",
@@ -754,14 +763,22 @@ def get_pipeline_catalog() -> dict:
             },
         },
         "hr": {
-            "label": "HR & Education",
+            "label": "Career & Recruitment",
             "color": "#fce7f3",
             "accent": "#db2777",
             "icon": "👤",
             "pipelines": {
-                "resume_parser":       {"label": "Resume / CV Parser",     "desc": "Skills, experience timeline, education → ATS-ready JSON + score"},
-                "certificate_verifier":{"label": "Certificate Verifier",   "desc": "Institution, candidate, date, grade, expiry validation"},
-                "transcript_analyzer": {"label": "Transcript Analyzer",    "desc": "Courses, grades, GPA computation, credit hours, honors"},
+                "resume_parser": {"label": "Resume / CV Parser", "desc": "Skills, experience timeline, education → ATS-ready JSON + score"},
+            },
+        },
+        "education": {
+            "label": "Education & Knowledge",
+            "color": "#ede9fe",
+            "accent": "#7c3aed",
+            "icon": "🎓",
+            "pipelines": {
+                "certificate_verifier": {"label": "Certificate Verifier",  "desc": "Institution, candidate, date, grade, expiry validation"},
+                "transcript_analyzer":  {"label": "Transcript Analyzer",   "desc": "Courses, grades, GPA computation, credit hours, honors"},
             },
         },
         "government": {

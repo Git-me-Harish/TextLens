@@ -83,6 +83,7 @@ class JobOut(BaseModel):
     error_message: Optional[str]
     page_count: Optional[int]
     processing_time_ms: Optional[int]
+    ocr_confidence: Optional[float] = None
     created_at: datetime
     completed_at: Optional[datetime]
 
@@ -282,3 +283,25 @@ class AuditLogListResponse(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+class NotificationOut(BaseModel):
+    id: str
+    type: str
+    status: str
+    title: str
+    message: Optional[str]
+    link: Optional[str]
+    entity_type: Optional[str]
+    entity_id: Optional[str]
+    is_read: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class NotificationListResponse(BaseModel):
+    notifications: List[NotificationOut]
+    total: int
+    unread_count: int

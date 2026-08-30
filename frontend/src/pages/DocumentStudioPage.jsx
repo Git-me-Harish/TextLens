@@ -1,14 +1,18 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, lazy, Suspense } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   FileText, Hash, Layers, Scissors, Minimize2,
   Image as ImageIcon, Download, RotateCcw, Check,
-  Upload, X, ChevronRight,
+  Upload, X, ChevronRight, ChevronLeft, PenLine,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import api, { errMsg } from "../lib/api";
 import { Spinner } from "../components/ui";
 import { waitForJobSSE } from "../hooks/useSSE";
+
+// Lazy-loaded — pdfjs-dist + pdf-lib add ~900KB and only the PDF Editor
+// tool needs them, so most Studio visitors never pay for this bundle.
+const PdfEditor = lazy(() => import("../components/studio/PdfEditor"));
 
 /*  Action definitions  */
 
@@ -94,6 +98,19 @@ const ACTIONS = [
     minFiles:    1,
     endpoint:    "studio/combine",
   },
+  {
+    id:          "pdf_edit",
+    label:       "Edit PDF",
+    badge:       "Correct",
+    desc:        "Reorder, rotate, delete pages and add text before extraction",
+    icon:        PenLine,
+    color:       "#9333ea",
+    bg:          "#faf5ff",
+    accept:      { "application/pdf": [] },
+    acceptLabel: "PDF only",
+    multi:       false,
+    endpoint:    "client",
+  },
 ];
 
 /* Action card */
@@ -148,15 +165,14 @@ function ActionCard({ action, selected, onSelect }) {
 function ResultPanel({ job, action, onReset }) {
   const [downloading, setDownloading] = useState(false);
 
-  const download = async () => {
-    if (!job.result_file_path && !job.id) return;
+  const download = () => {
+    if (!job.id) return;
     setDownloading(true);
-    try {
-      // Redirect to presigned URL
-      window.open(`/api/v1/jobs/${job.id}/download`, "_blank");
-    } finally {
-      setDownloading(false);
-    }
+    // Opens the presigned-redirect endpoint in a new tab — nothing to await
+    // here (the browser navigates that tab independently), so this is only
+    // ever a brief visual pulse rather than a real loading state.
+    window.open(`/api/v1/jobs/${job.id}/download`, "_blank");
+    setTimeout(() => setDownloading(false), 400);
   };
 
   return (
@@ -418,8 +434,13 @@ function OperationPanel({ action, onComplete }) {
 export default function DocumentStudioPage() {
   const [activeAction, setActiveAction] = useState(null);
   const [result, setResult]             = useState(null);
+  const trackRef = useRef(null);
 
   const reset = () => { setResult(null); setActiveAction(null); };
+
+  const scrollByCard = (dir) => {
+    trackRef.current?.scrollBy({ left: dir * 220, behavior: "smooth" });
+  };
 
   return (
     <div>
@@ -427,31 +448,38 @@ export default function DocumentStudioPage() {
         <div>
           <h1 className="page-title">Document Studio</h1>
           <p className="page-subtitle">
-            Convert, merge, split, compress — all your document operations in one place
+            Convert, merge, split, compress, edit — all your document operations in one place
           </p>
         </div>
       </div>
 
-      {/* Action grid */}
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-        gap: "0.875rem",
-        marginBottom: "1.5rem",
-      }}>
-        {ACTIONS.map(action => (
-          <ActionCard
-            key={action.id}
-            action={action}
-            selected={activeAction?.id === action.id}
-            onSelect={(a) => { setActiveAction(a); setResult(null); }}
-          />
-        ))}
+      {/* Action carousel */}
+      <div className="studio-carousel">
+        <button type="button" className="studio-carousel-nav" onClick={() => scrollByCard(-1)} aria-label="Scroll left">
+          <ChevronLeft size={16} />
+        </button>
+        <div className="studio-carousel-track" ref={trackRef}>
+          {ACTIONS.map(action => (
+            <ActionCard
+              key={action.id}
+              action={action}
+              selected={activeAction?.id === action.id}
+              onSelect={(a) => { setActiveAction(a); setResult(null); }}
+            />
+          ))}
+        </div>
+        <button type="button" className="studio-carousel-nav" onClick={() => scrollByCard(1)} aria-label="Scroll right">
+          <ChevronRight size={16} />
+        </button>
       </div>
 
       {/* Operation panel or result */}
       {result ? (
         <ResultPanel job={result} action={activeAction} onReset={reset} />
+      ) : activeAction?.endpoint === "client" ? (
+        <Suspense fallback={<div className="card" style={{ padding: "2rem", textAlign: "center" }}><Spinner size={26} /></div>}>
+          <PdfEditor action={activeAction} onComplete={(job) => setResult(job)} />
+        </Suspense>
       ) : activeAction ? (
         <OperationPanel
           action={activeAction}

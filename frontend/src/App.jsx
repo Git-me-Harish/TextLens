@@ -27,7 +27,6 @@ import SchedulesPage      from "./pages/SchedulesPage";
 // Tools — new consolidated pages
 import UniversalExtractorPage from "./pages/UniversalExtractorPage";
 import DocumentStudioPage     from "./pages/DocumentStudioPage";
-import SummarizePage          from "./pages/SummarizePage";
 import PDFChatPage            from "./pages/PDFChatPage";
 import ChatHistoryPage        from "./pages/ChatHistoryPage";
 
@@ -80,7 +79,8 @@ export default function App() {
 
               <Route path="/tools/extract"   element={<PL><UniversalExtractorPage /></PL>} />
               <Route path="/tools/studio"    element={<PL><DocumentStudioPage /></PL>} />
-              <Route path="/tools/summarize" element={<PL><SummarizePage /></PL>} />
+              {/* Summarize folded into Document Studio as a tool tile — redirect old links */}
+              <Route path="/tools/summarize" element={<Navigate to="/tools/studio" replace />} />
               <Route path="/tools/pdf-chat"  element={<PL><PDFChatPage /></PL>} />
               <Route path="/chat-history"    element={<PL><ChatHistoryPage /></PL>} />
 

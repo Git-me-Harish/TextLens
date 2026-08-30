@@ -11,4 +11,6 @@ export function PDFToWordPage() {
   return <Navigate to="/tools/studio" replace />;
 }
 
-export { default as SummarizePage } from "./SummarizePage";
+export function SummarizePage() {
+  return <Navigate to="/tools/studio" replace />;
+}

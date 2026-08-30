@@ -1,9 +1,9 @@
-import { useState, useCallback, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, lazy, Suspense } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   FileText, Hash, Layers, Scissors, Minimize2,
   Image as ImageIcon, Download, RotateCcw, Check,
-  Upload, X, ChevronRight, ChevronLeft, PenLine,
+  Upload, X, ChevronRight, ChevronLeft, PenLine, Sparkles,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import api, { errMsg } from "../lib/api";
@@ -13,6 +13,7 @@ import { waitForJobSSE } from "../hooks/useSSE";
 // Lazy-loaded — pdfjs-dist + pdf-lib add ~900KB and only the PDF Editor
 // tool needs them, so most Studio visitors never pay for this bundle.
 const PdfEditor = lazy(() => import("../components/studio/PdfEditor"));
+const SummarizePanel = lazy(() => import("../components/studio/SummarizePanel"));
 
 /*  Action definitions  */
 
@@ -109,7 +110,20 @@ const ACTIONS = [
     accept:      { "application/pdf": [] },
     acceptLabel: "PDF only",
     multi:       false,
-    endpoint:    "client",
+    panel:       "editor",
+  },
+  {
+    id:          "pdf_summarize",
+    label:       "Summarize",
+    badge:       "AI",
+    desc:        "Generate an executive, bullet, topic, or detailed summary",
+    icon:        Sparkles,
+    color:       "#ea580c",
+    bg:          "#fff7ed",
+    accept:      { "application/pdf": [] },
+    acceptLabel: "PDF only",
+    multi:       false,
+    panel:       "summarize",
   },
 ];
 
@@ -348,82 +362,90 @@ function OperationPanel({ action, onComplete }) {
         </div>
       )}
 
-      {/* Drop zone */}
-      <div
-        {...getRootProps()}
-        className={`dropzone ${isDragActive ? "active" : ""}`}
-        style={{ minHeight: 120, marginBottom: files.length ? "1rem" : 0 }}
-      >
-        <input {...getInputProps()} />
-        {processing ? (
-          <div style={{ textAlign: "center" }}>
-            <Spinner size={26} />
-            <p style={{ marginTop: 10, color: "var(--ink-muted)", fontSize: "0.82rem" }} className="pulsing">
-              {statusMsg}
-            </p>
-          </div>
-        ) : (
-          <>
-            <div className="dropzone-icon" style={{ marginBottom: 6 }}>
-              <Upload size={22} />
-            </div>
-            <div className="dropzone-title" style={{ fontSize: "0.88rem" }}>
-              {action.multi ? "Drop files here" : "Drop file here"} or click to browse
-            </div>
-            <div className="dropzone-sub">{action.acceptLabel}</div>
-          </>
-        )}
-      </div>
-
-      {/* Staged file list */}
-      {files.length > 0 && (
-        <div style={{ marginBottom: "1rem", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
-          {files.map((f, i) => (
-            <div key={i} style={{
-              display: "flex", alignItems: "center", gap: 10,
-              padding: "0.5rem 0.875rem",
-              borderBottom: i < files.length - 1 ? "1px solid var(--border)" : "none",
-              background: "var(--paper)",
-            }}>
-              <FileText size={13} style={{ color: action.color, flexShrink: 0 }} />
-              <span style={{ flex: 1, fontSize: "0.82rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--ink-secondary)" }}>
-                {f.name}
-              </span>
-              <span style={{ fontSize: "0.72rem", color: "var(--ink-muted)" }}>
-                {(f.size / 1024).toFixed(0)} KB
-              </span>
-              {!processing && (
-                <button onClick={() => removeFile(i)} style={{ background: "none", border: "none", cursor: "pointer", padding: 2, color: "var(--ink-muted)", flexShrink: 0 }}>
-                  <X size={13} />
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Submit */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <span style={{ fontSize: "0.78rem", color: "var(--ink-muted)" }}>
-          {action.multi && files.length > 0 && `${files.length} file${files.length > 1 ? "s" : ""} selected`}
-          {action.multi && action.minFiles && files.length < action.minFiles && ` (need at least ${action.minFiles})`}
-        </span>
-        <button
-          onClick={process}
-          disabled={!canSubmit || processing}
-          style={{
-            display: "flex", alignItems: "center", gap: 7,
-            background: canSubmit && !processing ? action.color : "var(--border)",
-            color: canSubmit && !processing ? "#fff" : "var(--ink-muted)",
-            border: "none", borderRadius: 8,
-            padding: "0.55rem 1.25rem",
-            cursor: canSubmit && !processing ? "pointer" : "not-allowed",
-            fontWeight: 600, fontSize: "0.875rem",
-            transition: "all 0.15s",
-          }}
+      {/* Upload area — dropzone, staged files, and the submit button all live
+          inside one bordered box so the action button reads as attached to
+          the upload area instead of floating separately below it. */}
+      <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+        <div
+          {...getRootProps()}
+          className={`dropzone ${isDragActive ? "active" : ""}`}
+          style={{ minHeight: 120, border: "none", borderRadius: 0 }}
         >
-          {processing ? <><Spinner size={13} /> Processing…</> : <>{action.label} <ChevronRight size={14} /></>}
-        </button>
+          <input {...getInputProps()} />
+          {processing ? (
+            <div style={{ textAlign: "center" }}>
+              <Spinner size={26} />
+              <p style={{ marginTop: 10, color: "var(--ink-muted)", fontSize: "0.82rem" }} className="pulsing">
+                {statusMsg}
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="dropzone-icon" style={{ marginBottom: 6 }}>
+                <Upload size={22} />
+              </div>
+              <div className="dropzone-title" style={{ fontSize: "0.88rem" }}>
+                {action.multi ? "Drop files here" : "Drop file here"} or click to browse
+              </div>
+              <div className="dropzone-sub">{action.acceptLabel}</div>
+            </>
+          )}
+        </div>
+
+        {/* Staged file list */}
+        {files.length > 0 && (
+          <div style={{ borderTop: "1px solid var(--border)" }}>
+            {files.map((f, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "0.5rem 0.875rem",
+                borderBottom: "1px solid var(--border)",
+                background: "var(--paper)",
+              }}>
+                <FileText size={13} style={{ color: action.color, flexShrink: 0 }} />
+                <span style={{ flex: 1, fontSize: "0.82rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--ink-secondary)" }}>
+                  {f.name}
+                </span>
+                <span style={{ fontSize: "0.72rem", color: "var(--ink-muted)" }}>
+                  {(f.size / 1024).toFixed(0)} KB
+                </span>
+                {!processing && (
+                  <button onClick={() => removeFile(i)} style={{ background: "none", border: "none", cursor: "pointer", padding: 2, color: "var(--ink-muted)", flexShrink: 0 }}>
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Action bar — the footer of the same box, so the button is
+            visually anchored to the upload area rather than detached. */}
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+          padding: "0.75rem 1rem", borderTop: "1px solid var(--border)", background: "var(--paper)",
+        }}>
+          <span style={{ fontSize: "0.78rem", color: "var(--ink-muted)" }}>
+            {action.multi && files.length > 0 && `${files.length} file${files.length > 1 ? "s" : ""} selected`}
+            {action.multi && action.minFiles && files.length < action.minFiles && ` (need at least ${action.minFiles})`}
+          </span>
+          <button
+            onClick={process}
+            disabled={!canSubmit || processing}
+            style={{
+              display: "flex", alignItems: "center", gap: 7,
+              background: canSubmit && !processing ? action.color : "var(--border)",
+              color: canSubmit && !processing ? "#fff" : "var(--ink-muted)",
+              border: "none", borderRadius: 8,
+              padding: "0.55rem 1.25rem",
+              cursor: canSubmit && !processing ? "pointer" : "not-allowed",
+              fontWeight: 600, fontSize: "0.875rem",
+              transition: "all 0.15s",
+            }}
+          >
+            {processing ? <><Spinner size={13} /> Processing…</> : <>{action.label} <ChevronRight size={14} /></>}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -431,16 +453,21 @@ function OperationPanel({ action, onComplete }) {
 
 /* Main page */
 
+const PAGE_SIZE = 6;
+
 export default function DocumentStudioPage() {
   const [activeAction, setActiveAction] = useState(null);
   const [result, setResult]             = useState(null);
-  const trackRef = useRef(null);
+  const [page, setPage]                 = useState(0);
 
   const reset = () => { setResult(null); setActiveAction(null); };
 
-  const scrollByCard = (dir) => {
-    trackRef.current?.scrollBy({ left: dir * 220, behavior: "smooth" });
-  };
+  const pageCount = Math.ceil(ACTIONS.length / PAGE_SIZE);
+  const visibleActions = ACTIONS.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+
+  const lazyFallback = (
+    <div className="card" style={{ padding: "2rem", textAlign: "center" }}><Spinner size={26} /></div>
+  );
 
   return (
     <div>
@@ -448,18 +475,27 @@ export default function DocumentStudioPage() {
         <div>
           <h1 className="page-title">Document Studio</h1>
           <p className="page-subtitle">
-            Convert, merge, split, compress, edit — all your document operations in one place
+            Convert, merge, split, compress, edit, summarize — all your document operations in one place
           </p>
         </div>
       </div>
 
-      {/* Action carousel */}
+      {/* Action grid — a fixed set of tiles per page, paged with prev/next
+          rather than a scrolling carousel (which had positioning problems). */}
       <div className="studio-carousel">
-        <button type="button" className="studio-carousel-nav" onClick={() => scrollByCard(-1)} aria-label="Scroll left">
-          <ChevronLeft size={16} />
-        </button>
-        <div className="studio-carousel-track" ref={trackRef}>
-          {ACTIONS.map(action => (
+        {pageCount > 1 && (
+          <button
+            type="button"
+            className="studio-carousel-nav"
+            onClick={() => setPage(p => Math.max(0, p - 1))}
+            disabled={page === 0}
+            aria-label="Previous options"
+          >
+            <ChevronLeft size={16} />
+          </button>
+        )}
+        <div className="studio-carousel-track">
+          {visibleActions.map(action => (
             <ActionCard
               key={action.id}
               action={action}
@@ -468,17 +504,34 @@ export default function DocumentStudioPage() {
             />
           ))}
         </div>
-        <button type="button" className="studio-carousel-nav" onClick={() => scrollByCard(1)} aria-label="Scroll right">
-          <ChevronRight size={16} />
-        </button>
+        {pageCount > 1 && (
+          <button
+            type="button"
+            className="studio-carousel-nav"
+            onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
+            disabled={page === pageCount - 1}
+            aria-label="More options"
+          >
+            <ChevronRight size={16} />
+          </button>
+        )}
       </div>
+      {pageCount > 1 && (
+        <div style={{ textAlign: "center", fontSize: "0.72rem", color: "var(--ink-muted)", marginTop: "-1rem", marginBottom: "1.5rem" }}>
+          Page {page + 1} of {pageCount}
+        </div>
+      )}
 
       {/* Operation panel or result */}
       {result ? (
         <ResultPanel job={result} action={activeAction} onReset={reset} />
-      ) : activeAction?.endpoint === "client" ? (
-        <Suspense fallback={<div className="card" style={{ padding: "2rem", textAlign: "center" }}><Spinner size={26} /></div>}>
+      ) : activeAction?.panel === "editor" ? (
+        <Suspense fallback={lazyFallback}>
           <PdfEditor action={activeAction} onComplete={(job) => setResult(job)} />
+        </Suspense>
+      ) : activeAction?.panel === "summarize" ? (
+        <Suspense fallback={lazyFallback}>
+          <SummarizePanel action={activeAction} />
         </Suspense>
       ) : activeAction ? (
         <OperationPanel

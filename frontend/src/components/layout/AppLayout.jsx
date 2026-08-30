@@ -25,7 +25,6 @@ const NAV = [
     items: [
       { label: "Quick Extract",    icon: FileText,    to: "/tools/pdf-extract" },
       { label: "Image OCR",        icon: FileSearch,  to: "/tools/ocr-image" },
-      { label: "PDF to Word",      icon: FileText,    to: "/tools/pdf-to-word" },
       { label: "PDF Chat",         icon: FileText,    to: "/tools/pdf-chat" },
       { label: "Document Studio",  icon: Wand2,       to: "/tools/studio" },
       { label: "Chat History",     icon: MessageSquare, to: "/chat-history" },

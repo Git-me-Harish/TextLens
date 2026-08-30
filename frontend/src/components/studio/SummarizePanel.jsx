@@ -1,17 +1,24 @@
 import { useState, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
 import { useNavigate } from "react-router-dom";
-import { Upload, RotateCcw, Copy, Check, Download, Sparkles } from "lucide-react";
+import {
+  Upload, RotateCcw, Copy, Check, Download, Sparkles,
+  ClipboardList, List, Tags, AlignLeft,
+} from "lucide-react";
 import toast from "react-hot-toast";
 import api, { errMsg } from "../../lib/api";
 import { Spinner } from "../ui";
 import { waitForJobSSE } from "../../hooks/useSSE";
 
+// ratio = fraction of source sentences kept by the backend's extractive
+// summarizer (ocr_service.summarize_text) — sent as a form field so the
+// chosen style actually changes the summary's length, not just how the
+// same text gets re-formatted client-side afterward.
 const STYLES = [
-  { id: "executive", label: "Executive",     icon: "📋", desc: "3–5 sentence overview for quick decisions", format: "paragraph" },
-  { id: "bullets",   label: "Bullet Points",  icon: "•",  desc: "Scannable list of key takeaways",           format: "bullets"   },
-  { id: "topics",    label: "Key Topics",     icon: "🏷", desc: "Main themes with brief explanations",       format: "topics"    },
-  { id: "detailed",  label: "Detailed",       icon: "📄", desc: "Comprehensive summary covering all sections", format: "paragraph" },
+  { id: "executive", label: "Executive",    icon: ClipboardList, desc: "3–5 sentence overview for quick decisions",   format: "paragraph", ratio: 0.15 },
+  { id: "bullets",   label: "Bullet Points", icon: List,          desc: "Scannable list of key takeaways",             format: "bullets",    ratio: 0.25 },
+  { id: "topics",    label: "Key Topics",    icon: Tags,          desc: "Main themes with brief explanations",         format: "topics",     ratio: 0.20 },
+  { id: "detailed",  label: "Detailed",      icon: AlignLeft,     desc: "Comprehensive summary covering all sections", format: "paragraph", ratio: 0.50 },
 ];
 
 function formatAsBullets(text) {
@@ -80,6 +87,7 @@ export default function SummarizePanel({ action }) {
     const form = new FormData();
     form.append("file", file);
     form.append("job_type", "pdf_summarize");
+    form.append("ratio", currentStyle.ratio);
     try {
       const { data: submitted } = await api.post("/jobs/upload", form, {
         headers: { "Content-Type": "multipart/form-data" },
@@ -100,7 +108,7 @@ export default function SummarizePanel({ action }) {
       setUploading(false);
       setStatusMsg("");
     }
-  }, []);
+  }, [currentStyle]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop, accept: { "application/pdf": [] }, maxFiles: 1, disabled: uploading,
@@ -126,8 +134,10 @@ export default function SummarizePanel({ action }) {
         <div className="card" style={{ padding: "0.875rem 1.25rem", display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 600, fontSize: "0.88rem", color: "var(--ink)", marginBottom: 2 }}>{job.original_filename}</div>
-            <div style={{ display: "flex", gap: 10, fontSize: "0.75rem", color: "var(--ink-muted)" }}>
-              <span>{currentStyle?.icon} {currentStyle?.label} summary</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: "0.75rem", color: "var(--ink-muted)" }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                {currentStyle && <currentStyle.icon size={12} />} {currentStyle?.label} summary
+              </span>
               {job.page_count && <span>· {job.page_count} pages</span>}
               {job.processing_time_ms && <span>· {job.processing_time_ms.toLocaleString()}ms</span>}
             </div>
@@ -142,8 +152,8 @@ export default function SummarizePanel({ action }) {
           </div>
         </div>
         <div className="card" style={{ padding: "1.5rem" }}>
-          <div style={{ fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--ink-muted)", marginBottom: "1rem" }}>
-            {currentStyle?.icon} {currentStyle?.label} Summary
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--ink-muted)", marginBottom: "1rem" }}>
+            {currentStyle && <currentStyle.icon size={13} />} {currentStyle?.label} Summary
           </div>
           <SummaryResult text={summaryText} styleId={selectedStyle} />
         </div>
@@ -173,7 +183,7 @@ export default function SummarizePanel({ action }) {
                 cursor: "pointer", transition: "all 0.15s", textAlign: "center",
               }}
             >
-              <div style={{ fontSize: "1.25rem", marginBottom: 5 }}>{s.icon}</div>
+              <s.icon size={20} style={{ marginBottom: 5, color: selectedStyle === s.id ? "var(--accent)" : "var(--ink-muted)" }} />
               <div style={{ fontWeight: 700, fontSize: "0.82rem", color: selectedStyle === s.id ? "var(--accent)" : "var(--ink)", marginBottom: 3 }}>{s.label}</div>
               <div style={{ fontSize: "0.7rem", color: "var(--ink-muted)", lineHeight: 1.4 }}>{s.desc}</div>
             </div>

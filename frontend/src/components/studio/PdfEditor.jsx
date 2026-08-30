@@ -218,7 +218,8 @@ export default function PdfEditor({ action, onComplete }) {
           <h3 style={{ margin: 0, fontSize: "0.95rem", fontWeight: 700, color: "var(--ink)" }}>{action.label}</h3>
           <p style={{ margin: "0.25rem 0 0", fontSize: "0.8rem", color: "var(--ink-muted)" }}>{action.desc}</p>
         </div>
-        <div {...getRootProps()} className={`dropzone ${isDragActive ? "active" : ""}`} style={{ minHeight: 120 }}>
+        <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+        <div {...getRootProps()} className={`dropzone ${isDragActive ? "active" : ""}`} style={{ minHeight: 120, border: "none", borderRadius: 0 }}>
           <input {...getInputProps()} />
           {loading ? (
             <div style={{ textAlign: "center" }}>
@@ -232,6 +233,7 @@ export default function PdfEditor({ action, onComplete }) {
               <div className="dropzone-sub">PDF only</div>
             </>
           )}
+        </div>
         </div>
       </div>
     );

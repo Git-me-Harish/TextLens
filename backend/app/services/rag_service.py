@@ -18,6 +18,8 @@ RRF formula:
   score(d) = Σ_{r ∈ rankings} 1 / (k + rank_r(d))
   k = 60  (standard value — flattens influence of top vs mid-ranked results)
 """
+import hashlib
+import json
 import math
 import re
 from typing import Any
@@ -28,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.embedding_service import embed_query, vec_to_pg_str
 from app.models.models import DocumentChunk
+from app.db.redis import get_redis
 
 logger = structlog.get_logger(__name__)
 
@@ -35,6 +38,37 @@ _RRF_K       = 60
 _VECTOR_N    = 20   # candidates from vector search
 _BM25_N      = 20   # candidates from BM25 search
 _DEFAULT_K   = 8    # top-k returned to caller
+
+# Retrieval (embed + vector search + BM25 + fusion) is deterministic given
+# just (job_id, query) — unlike the final LLM answer, it doesn't depend on
+# conversation history, so it's always safe to cache. This is what actually
+# saves cost/latency on repeated or similar questions: the Voyage embedding
+# call and the two DB scans, not the Groq call itself (which stays
+# uncached — a follow-up question like "what about the second one?" needs
+# a fresh answer even when the underlying retrieval is identical).
+_CACHE_TTL_SECONDS = 3600
+_CACHE_PREFIX = "rag_retrieve"
+
+
+def _cache_key(job_id: str, query: str) -> str:
+    normalized = " ".join(query.strip().lower().split())
+    digest = hashlib.sha256(normalized.encode()).hexdigest()
+    return f"{_CACHE_PREFIX}:{job_id}:{digest}"
+
+
+async def invalidate_cache(job_id: str) -> None:
+    """
+    Drop every cached retrieval for this document — call after (re-)ingestion
+    so a manual re-index can't leave stale pre-reingest chunks being served.
+    """
+    try:
+        redis = await get_redis()
+        keys = [key async for key in redis.scan_iter(match=f"{_CACHE_PREFIX}:{job_id}:*")]
+        if keys:
+            await redis.delete(*keys)
+            logger.info("rag.cache_invalidated", job_id=job_id[:8], keys=len(keys))
+    except Exception as exc:
+        logger.warning("rag.cache_invalidate_failed", job_id=job_id[:8], error=str(exc))
 
 # Max chars to include in assembled context (≈6k tokens for Groq)
 _MAX_CONTEXT_CHARS = 24_000
@@ -68,9 +102,17 @@ async def _vector_search(
             "limit": limit,
         },
     )
+    # str() — raw SQL returns asyncpg.pgproto.pgproto.UUID objects, not
+    # plain strings. _fetch_chunks() looks these ids up through the ORM,
+    # where DocumentChunk.id is Mapped[str]; comparing a UUID object
+    # against that column silently matched nothing (reproduced live:
+    # _vector_search found the right row, but _fetch_chunks always came
+    # back empty for it — every real RAG retrieval was quietly falling
+    # through to the TF-IDF fallback since chunks were never fetchable).
+    return [(str(row.id), float(row.similarity)) for row in rows]
 
 
-# BM25 / full-text search 
+# BM25 / full-text search
 async def _bm25_search(
     db: AsyncSession,
     job_id: str,
@@ -100,7 +142,7 @@ async def _bm25_search(
         """),
         {"query": clean_query, "job_id": job_id, "limit": limit},
     )
-    return [(row.id, float(row.rank)) for row in rows]
+    return [(str(row.id), float(row.rank)) for row in rows]
 
 
 # RRF fusion 
@@ -178,6 +220,18 @@ async def retrieve(
     """
     log = logger.bind(job_id=job_id[:8], query=query[:60])
 
+    cache_key = _cache_key(job_id, query)
+    try:
+        redis = await get_redis()
+        cached = await redis.get(cache_key)
+        if cached is not None:
+            log.info("rag.cache_hit")
+            return json.loads(cached)
+    except Exception as exc:
+        # Cache is a pure optimization — never let a Redis hiccup break chat.
+        log.warning("rag.cache_read_failed", error=str(exc))
+        redis = None
+
     try:
         query_embedding = await embed_query(query)
         vec_str = vec_to_pg_str(query_embedding)
@@ -201,6 +255,14 @@ async def retrieve(
         bm25_hits=len(bm25_results),
         fused_returned=len(chunks),
     )
+
+    if chunks:
+        try:
+            redis = redis if redis is not None else await get_redis()
+            await redis.set(cache_key, json.dumps(chunks), ex=_CACHE_TTL_SECONDS)
+        except Exception as exc:
+            log.warning("rag.cache_write_failed", error=str(exc))
+
     return chunks
 
 
@@ -306,11 +368,16 @@ def retrieve_fallback(text: str, query: str) -> str:
         reverse=True,
     )
     selected = sorted([i for i, _ in scored[:6]])
-    context, total = "", 0
-    for i in selected:
+    # Numbered the same way as build_context() — the system prompt always
+    # instructs the model to cite an excerpt number, and an unnumbered
+    # fallback context led it to fabricate a plausible-looking one anyway
+    # (reproduced live: "(Excerpt 3)" cited against a single, unnumbered
+    # fallback block).
+    parts, total = [], 0
+    for n, i in enumerate(selected, start=1):
         block = chunks[i]
         if total + len(block) > _FALLBACK_MAX_CHARS:
             break
-        context += block + "\n\n---\n\n"
+        parts.append(f"[Excerpt {n}]\n{block}")
         total += len(block)
-    return context.strip()
+    return "\n\n---\n\n".join(parts)

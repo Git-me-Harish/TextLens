@@ -122,12 +122,11 @@ textarea.form-input { resize: vertical; min-height: 80px; }
 .icon-btn:hover:not(:disabled) { background: var(--paper); border-color: var(--border-strong); }
 .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* Studio tool-row carousel */
-.studio-carousel { position: relative; display: flex; align-items: center; gap: 8px; margin-bottom: 1.5rem; }
-.studio-carousel-track { display: flex; gap: 0.875rem; overflow-x: auto; scroll-behavior: smooth; padding-bottom: 4px; scrollbar-width: none; }
-.studio-carousel-track::-webkit-scrollbar { display: none; }
-.studio-carousel-track > * { flex: 0 0 200px; }
-.studio-carousel-nav { flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--ink-secondary); }
+/* Studio tool grid — a fixed page of tiles, paged with prev/next (not a
+   scrolling carousel, which had positioning problems). */
+.studio-carousel { position: relative; display: flex; align-items: stretch; gap: 10px; margin-bottom: 0.5rem; }
+.studio-carousel-track { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.875rem; }
+.studio-carousel-nav { flex-shrink: 0; align-self: center; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--ink-secondary); }
 .studio-carousel-nav:hover:not(:disabled) { background: var(--paper); border-color: var(--border-strong); }
 .studio-carousel-nav:disabled { opacity: 0.3; cursor: not-allowed; }
 

@@ -5,36 +5,75 @@ Sessions store full message history in JSONB.
 Stateless per-request: client passes session_id, backend loads history from DB.
 """
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from pydantic import BaseModel
 
 from app.api.deps import get_current_user
+from app.core.limiter import limiter
 from app.db.database import get_db
-from app.models.models import User, OCRJob, JobStatus, ChatSession
+from app.models.models import ChatSession, JobStatus, JobType, OCRJob, User
 from app.services.chat_service import chat_with_document, generate_suggested_questions
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+# Job types whose result_text is genuine document content worth chatting
+# about — matches the set ingested into document_chunks by worker/tasks.py
+# (_INGESTIBLE_JOB_TYPES), so "chattable" and "has real RAG chunks or will
+# soon" stay in sync. pdf_qa's result_text is itself an answer, not the
+# document, and every other Studio job type (merge/split/compress/etc.)
+# has no meaningful body text.
+_CHATTABLE_JOB_TYPES = [
+    JobType.ocr_image, JobType.pdf_extract,
+    JobType.pdf_to_markdown, JobType.pdf_summarize,
+]
 
 
 # Schemas:
 class StartRequest(BaseModel):
     job_id: str
 
+
 class StartResponse(BaseModel):
     session_id: str
     title: str
     suggested_questions: list[str]
 
+
 class AskRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Question cannot be empty.")
+        return v
+
+
+class LegacyAskRequest(BaseModel):
+    """Flat-body shape for the deprecated POST /chat/ask endpoint."""
     session_id: str
-    message: str
+    message: str = Field(..., min_length=1, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Question cannot be empty.")
+        return v
+
 
 class AskResponse(BaseModel):
     answer: str
     model: str
     session_id: str
+    context_source: str
+
 
 class SessionOut(BaseModel):
     id: str
@@ -49,7 +88,110 @@ class SessionOut(BaseModel):
         from_attributes = True
 
 
+class ChattableDocumentOut(BaseModel):
+    """Lightweight projection for the "pick an existing document" picker —
+    deliberately excludes result_text so listing stays cheap even with
+    many long documents."""
+    id: str
+    original_filename: str
+    job_type: str
+    page_count: int | None
+    created_at: datetime
+    has_chunks: bool
+
+    class Config:
+        from_attributes = True
+
+
+async def _get_owned_session(db: AsyncSession, session_id: str, user_id: str) -> ChatSession:
+    res = await db.execute(
+        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+    )
+    session = res.scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return session
+
+
+async def _answer_and_persist(
+    db: AsyncSession, session: ChatSession, question: str
+) -> AskResponse:
+    """Shared by both ask routes — loads the source doc, runs retrieval +
+    the LLM call, and persists the updated message history."""
+    job_res = await db.execute(select(OCRJob).where(OCRJob.id == session.job_id))
+    job = job_res.scalar_one_or_none()
+    if not job or not job.result_text:
+        raise HTTPException(400, "Source document no longer available")
+
+    history = list(session.messages or [])
+    history.append({"role": "user", "content": question})
+
+    result = await chat_with_document(
+        job_id=session.job_id,
+        messages=history,
+        db=db,
+        fallback_text=job.result_text,
+    )
+    if result["error"]:
+        raise HTTPException(502, result["error"])
+
+    history.append({"role": "assistant", "content": result["answer"]})
+    session.messages = history
+    session.updated_at = datetime.utcnow()
+    db.add(session)
+    await db.commit()
+
+    return AskResponse(
+        answer=result["answer"],
+        model=result["model"],
+        session_id=session.id,
+        context_source=result["context_source"],
+    )
+
+
 # Endpoints:
+@router.get("/documents", response_model=list[ChattableDocumentOut])
+async def list_chattable_documents(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Documents the user can start (or resume) a chat with — completed jobs
+    of a type that has real body text. Backs the "use an existing PDF"
+    picker so a user doesn't have to re-upload a document they already
+    processed.
+    """
+    from app.models.models import DocumentChunk
+
+    res = await db.execute(
+        select(
+            OCRJob,
+            func.count(DocumentChunk.id).label("chunk_count"),
+        )
+        .outerjoin(DocumentChunk, DocumentChunk.job_id == OCRJob.id)
+        .where(
+            OCRJob.user_id == user.id,
+            OCRJob.status == JobStatus.completed,
+            OCRJob.job_type.in_(_CHATTABLE_JOB_TYPES),
+            OCRJob.result_text.is_not(None),
+        )
+        .group_by(OCRJob.id)
+        .order_by(OCRJob.created_at.desc())
+        .limit(200)
+    )
+    return [
+        ChattableDocumentOut(
+            id=job.id,
+            original_filename=job.original_filename,
+            job_type=job.job_type.value,
+            page_count=job.page_count,
+            created_at=job.created_at,
+            has_chunks=chunk_count > 0,
+        )
+        for job, chunk_count in res.all()
+    ]
+
+
 @router.post("/sessions", response_model=StartResponse, status_code=201)
 async def start_session(
     data: StartRequest,
@@ -68,7 +210,6 @@ async def start_session(
     if not job.result_text:
         raise HTTPException(400, "Document has no extracted text")
 
-    # Generate document-specific starter questions
     questions = await generate_suggested_questions(job.result_text)
 
     session = ChatSession(
@@ -89,70 +230,56 @@ async def start_session(
     )
 
 
-@router.post("/ask", response_model=AskResponse)
-async def ask(
+@router.post("/sessions/{session_id}/ask", response_model=AskResponse)
+@limiter.limit("15/minute")
+async def ask_in_session(
+    request: Request,
+    session_id: str,
     data: AskRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Send a message. Loads history from DB, appends, saves back."""
-    res = await db.execute(
-        select(ChatSession).where(ChatSession.id == data.session_id, ChatSession.user_id == user.id)
-    )
-    session = res.scalar_one_or_none()
-    if not session:
-        raise HTTPException(404, "Session not found")
+    """
+    Canonical send-a-message endpoint — matches the frontend's
+    /chat/sessions/{id}/ask contract. Rate-limited tighter than the app
+    default since every call costs a real Groq (and possibly Voyage) API
+    call.
+    """
+    session = await _get_owned_session(db, session_id, user.id)
+    return await _answer_and_persist(db, session, data.message)
 
-    # Load the source document
-    job_res = await db.execute(select(OCRJob).where(OCRJob.id == session.job_id))
-    job = job_res.scalar_one_or_none()
-    if not job or not job.result_text:
-        raise HTTPException(400, "Source document no longer available")
 
-    # Build full history including new message
-    history = list(session.messages or [])
-    user_msg = {"role": "user", "content": data.message}
-    history.append(user_msg)
-
-    # Track 3: pass job_id + db so chat_service uses RAG retrieval.
-    # fallback_text is used only when chunks aren't ingested yet.
-    result = await chat_with_document(
-        job_id=session.job_id,
-        messages=history,
-        db=db,
-        fallback_text=job.result_text,
-    )
-
-    if result["error"]:
-        raise HTTPException(502, result["error"])
-
-    assistant_msg = {"role": "assistant", "content": result["answer"]}
-    history.append(assistant_msg)
-
-    # Persist updated history
-    session.messages = history
-    session.updated_at = datetime.utcnow()
-    db.add(session)
-    await db.commit()
-
-    return AskResponse(
-        answer=result["answer"],
-        model=result["model"],
-        session_id=session.id,
-    )
+@router.post("/ask", response_model=AskResponse)
+@limiter.limit("15/minute")
+async def ask(
+    request: Request,
+    data: LegacyAskRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Legacy flat-body variant ({session_id, message}) — kept for any
+    existing callers. New code should use POST /chat/sessions/{id}/ask.
+    """
+    session = await _get_owned_session(db, data.session_id, user.id)
+    return await _answer_and_persist(db, session, data.message)
 
 
 @router.get("/sessions", response_model=list[SessionOut])
 async def list_sessions(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List all chat sessions with metadata."""
+    """List the user's chat sessions with metadata, newest-updated first."""
     res = await db.execute(
         select(ChatSession, OCRJob.original_filename)
         .join(OCRJob, ChatSession.job_id == OCRJob.id)
         .where(ChatSession.user_id == user.id)
         .order_by(ChatSession.updated_at.desc())
+        .limit(per_page)
+        .offset((page - 1) * per_page)
     )
     rows = res.all()
     return [
@@ -203,11 +330,6 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    res = await db.execute(
-        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user.id)
-    )
-    session = res.scalar_one_or_none()
-    if not session:
-        raise HTTPException(404, "Session not found")
+    session = await _get_owned_session(db, session_id, user.id)
     await db.delete(session)
     await db.commit()

@@ -15,10 +15,12 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+
+from app.core.limiter import limiter
 
 # Route imports
 from app.api.routes import agents, auth, export, jobs, users
@@ -95,13 +97,6 @@ async def lifespan(app: FastAPI):
     logger.info("textlens.shutdown")
 
 
-# Rate limiter
-limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
-)
-
-
 # FastAPI application
 app = FastAPI(
     title="TextLens API",
@@ -115,6 +110,10 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Previously configured but never enforced — default_limits only apply once
+# this middleware is registered. Individual routes (e.g. chat.py's /ask) can
+# still layer a tighter @limiter.limit(...) on top.
+app.add_middleware(SlowAPIMiddleware)
 
 
 # Middleware — order matters (outermost first)

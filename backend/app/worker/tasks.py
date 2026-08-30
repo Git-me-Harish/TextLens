@@ -727,6 +727,9 @@ async def _run_ingest(job_id: str) -> dict:
 
         await db.commit()
 
+    from app.services.rag_service import invalidate_cache
+    await invalidate_cache(job_id)
+
     log.info("ingest.complete", chunks_stored=len(chunks))
     return {"job_id": job_id, "chunks": len(chunks)}
 

@@ -3,12 +3,15 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import {
   Send, FileText, RotateCcw, Bot, User as UserIcon,
-  Copy, Check, History, Download, Zap, Brain,
+  Copy, Check, History, Download, Zap, Brain, MessageSquarePlus,
 } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 import toast from "react-hot-toast";
 import api, { errMsg } from "../lib/api";
-import { Button, Spinner } from "../components/ui";
+import { Spinner, Badge } from "../components/ui";
 import { waitForJobSSE } from "../hooks/useSSE";
+
+const MAX_QUESTION_LENGTH = 2000; // mirrors AskRequest on the backend
 
 /*  Inline markdown renderer (unchanged from V1)  */
 function InlineText({ text }) {
@@ -123,6 +126,67 @@ function MessageBubble({ msg }) {
   );
 }
 
+const JOB_TYPE_LABEL = {
+  ocr_image: "Image OCR",
+  pdf_extract: "PDF Extract",
+  pdf_to_markdown: "Markdown",
+  pdf_summarize: "Summary",
+};
+
+/* Existing-document picker — lets a user start a chat session against a
+   document they already processed, instead of always re-uploading. */
+function DocumentPicker({ documents, loading, onSelect, selectingId }) {
+  if (loading) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {[1, 2, 3].map(i => <div key={i} className="skeleton" style={{ height: 52, borderRadius: 8 }} />)}
+      </div>
+    );
+  }
+  if (documents.length === 0) {
+    return (
+      <div style={{ fontSize: "0.8rem", color: "var(--ink-muted)", textAlign: "center", padding: "1.5rem 0" }}>
+        No processed documents yet — upload one to get started.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
+      {documents.map(doc => (
+        <button
+          key={doc.id}
+          onClick={() => onSelect(doc)}
+          disabled={selectingId !== null}
+          style={{
+            display: "flex", alignItems: "center", gap: 10, textAlign: "left",
+            padding: "0.625rem 0.75rem", borderRadius: 8, border: "1px solid var(--border)",
+            background: "#fff", cursor: selectingId ? "default" : "pointer",
+            opacity: selectingId && selectingId !== doc.id ? 0.5 : 1,
+          }}
+        >
+          <FileText size={15} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: "0.82rem", fontWeight: 500, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {doc.original_filename}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+              <span style={{ fontSize: "0.7rem", color: "var(--ink-muted)" }}>
+                {formatDistanceToNow(new Date(doc.created_at), { addSuffix: true })}
+              </span>
+              {doc.has_chunks && <Badge variant="accent">RAG-ready</Badge>}
+            </div>
+          </div>
+          {selectingId === doc.id ? <Spinner size={16} /> : (
+            <span style={{ fontSize: "0.68rem", color: "var(--ink-muted)", flexShrink: 0 }}>
+              {JOB_TYPE_LABEL[doc.job_type] || doc.job_type}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function TypingIndicator() {
   return (
     <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
@@ -147,10 +211,35 @@ export default function PDFChatPage() {
   const [input, setInput]         = useState("");
   const [asking, setAsking]       = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
+  const [documents, setDocuments] = useState([]);
+  const [docsLoading, setDocsLoading] = useState(true);
+  const [selectingId, setSelectingId] = useState(null);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, asking]);
+
+  // Documents available for the "use an existing PDF" picker
+  useEffect(() => {
+    api.get("/chat/documents")
+      .then(({ data }) => setDocuments(data))
+      .catch(() => {}) // non-critical — picker just shows empty state
+      .finally(() => setDocsLoading(false));
+  }, []);
+
+  const startSessionForJob = useCallback(async (jobId, filename) => {
+    setSelectingId(jobId);
+    try {
+      const { data: sess } = await api.post("/chat/sessions", { job_id: jobId });
+      setSession({ id: sess.id, title: sess.title, job_id: jobId, suggested_questions: sess.suggested_questions, filename });
+      setMessages([{ role: "system", content: `Document loaded: ${filename}` }]);
+      setTimeout(() => inputRef.current?.focus(), 100);
+    } catch (err) {
+      toast.error(errMsg(err, "Could not start chat session"));
+    } finally {
+      setSelectingId(null);
+    }
+  }, []);
 
   // Resume from ?session=ID
   useEffect(() => {
@@ -184,10 +273,11 @@ export default function PDFChatPage() {
       if (done.status !== "completed") { toast.error(done.error_message || "Extraction failed"); return; }
 
       setStatusMsg("Creating chat session…");
-      const { data: sess } = await api.post("/chat/sessions", { job_id: done.id || submitted.id, title: file.name });
-      setSession({ id: sess.id, title: sess.title, job_id: sess.job_id, suggested_questions: sess.suggested_questions, filename: file.name });
-      setMessages([{ role: "system", content: `Document loaded: ${file.name}` }]);
-      setTimeout(() => inputRef.current?.focus(), 100);
+      await startSessionForJob(done.id || submitted.id, file.name);
+      // Newly-uploaded documents won't have chunks yet (ingestion runs
+      // async after this), so refresh the picker list in the background —
+      // next visit will show it as available with its RAG-ready badge.
+      api.get("/chat/documents").then(({ data }) => setDocuments(data)).catch(() => {});
       toast.success("Ready — start asking questions");
     } catch (err) {
       const detail = err.response?.data?.detail;
@@ -197,12 +287,9 @@ export default function PDFChatPage() {
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>Already processed</div>
               <div style={{ fontSize: "0.8rem", color: "#666" }}>Use the existing extracted text to start a chat.</div>
-              <button onClick={async () => {
+              <button onClick={() => {
                 toast.dismiss(t.id);
-                const { data: sess } = await api.post("/chat/sessions", { job_id: detail.existing_job_id, title: detail.original_filename });
-                setSession({ id: sess.id, title: sess.title, job_id: sess.job_id, suggested_questions: sess.suggested_questions, filename: detail.original_filename });
-                setMessages([{ role: "system", content: `Document loaded: ${detail.original_filename}` }]);
-                setTimeout(() => inputRef.current?.focus(), 100);
+                startSessionForJob(detail.existing_job_id, detail.original_filename);
               }} style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem", alignSelf: "flex-start" }}>
                 Use existing
               </button>
@@ -229,12 +316,19 @@ export default function PDFChatPage() {
   const sendMessage = async (text) => {
     const question = text.trim();
     if (!question || !session || asking) return;
+    if (question.length > MAX_QUESTION_LENGTH) {
+      toast.error(`Keep questions under ${MAX_QUESTION_LENGTH} characters.`);
+      return;
+    }
     const userMsg = { role: "user", content: question };
     setMessages(prev => [...prev, userMsg]);
     setInput("");
     setAsking(true);
     try {
-      const { data } = await api.post(`/chat/sessions/${session.id}/ask`, { question });
+      // Body key must be `message` — matches AskRequest on the backend
+      // (backend/app/api/routes/chat.py). This previously sent `question`,
+      // which the route never read, so every send here 404'd/validated-out.
+      const { data } = await api.post(`/chat/sessions/${session.id}/ask`, { message: question });
       setMessages(prev => [...prev, {
         role: "assistant",
         content: data.answer || "I couldn't find an answer in the document.",
@@ -242,6 +336,10 @@ export default function PDFChatPage() {
       }]);
     } catch (err) {
       toast.error(errMsg(err, "Failed to get answer"));
+      // Roll back the optimistic user message so a failed send doesn't
+      // silently look like it was accepted.
+      setMessages(prev => prev.filter(m => m !== userMsg));
+      setInput(question);
     } finally {
       setAsking(false);
       setTimeout(() => inputRef.current?.focus(), 50);
@@ -264,7 +362,12 @@ export default function PDFChatPage() {
     a.click();
   };
 
-  const reset = () => { setSession(null); setMessages([]); setInput(""); };
+  const reset = () => {
+    setSession(null);
+    setMessages([]);
+    setInput("");
+    api.get("/chat/documents").then(({ data }) => setDocuments(data)).catch(() => {});
+  };
 
   const humanMessages = messages.filter(m => m.role !== "system");
 
@@ -297,15 +400,15 @@ export default function PDFChatPage() {
         </div>
       </div>
 
-      {/* Upload state */}
+      {/* Upload state — new document, or pick one already processed */}
       {!session && (
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "1rem" }}>
-          {resuming ? (
-            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <Spinner size={28} />
-            </div>
-          ) : (
-            <div {...getRootProps()} className={`dropzone ${isDragActive ? "active" : ""}`} style={{ flex: 1 }}>
+        resuming ? (
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Spinner size={28} />
+          </div>
+        ) : (
+          <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.25rem", minHeight: 0 }}>
+            <div {...getRootProps()} className={`dropzone ${isDragActive ? "active" : ""}`}>
               <input {...getInputProps()} />
               {uploading ? (
                 <div style={{ textAlign: "center" }}>
@@ -317,15 +420,28 @@ export default function PDFChatPage() {
               ) : (
                 <>
                   <div className="dropzone-icon"><FileText size={28} /></div>
-                  <div className="dropzone-title">Drop a PDF to start chatting</div>
+                  <div className="dropzone-title">Drop a new PDF to start chatting</div>
                   <div className="dropzone-sub">
                     Ask anything — answers are grounded in your document using RAG
                   </div>
                 </>
               )}
             </div>
-          )}
-        </div>
+
+            <div className="card" style={{ padding: "1.25rem", overflowY: "auto" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: "0.875rem" }}>
+                <MessageSquarePlus size={16} style={{ color: "var(--accent)" }} />
+                <span style={{ fontWeight: 600, fontSize: "0.88rem" }}>Or chat with a document you already processed</span>
+              </div>
+              <DocumentPicker
+                documents={documents}
+                loading={docsLoading}
+                onSelect={(doc) => startSessionForJob(doc.id, doc.original_filename)}
+                selectingId={selectingId}
+              />
+            </div>
+          </div>
+        )
       )}
 
       {/* Chat interface */}
@@ -364,10 +480,11 @@ export default function PDFChatPage() {
                 ref={inputRef}
                 className="form-input"
                 value={input}
-                onChange={e => setInput(e.target.value)}
+                onChange={e => setInput(e.target.value.slice(0, MAX_QUESTION_LENGTH))}
                 onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(input); } }}
                 placeholder="Ask a question about your document…"
                 disabled={asking}
+                maxLength={MAX_QUESTION_LENGTH}
                 style={{ flex: 1 }}
               />
               <button
@@ -384,6 +501,11 @@ export default function PDFChatPage() {
                 <Send size={16} color={input.trim() && !asking ? "#fff" : "var(--ink-muted)"} />
               </button>
             </div>
+            {input.length > MAX_QUESTION_LENGTH * 0.85 && (
+              <div style={{ textAlign: "right", fontSize: "0.68rem", color: input.length >= MAX_QUESTION_LENGTH ? "var(--danger)" : "var(--ink-muted)", marginTop: 4 }}>
+                {input.length} / {MAX_QUESTION_LENGTH}
+              </div>
+            )}
           </div>
         </div>
       )}

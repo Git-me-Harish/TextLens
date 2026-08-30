@@ -32,7 +32,16 @@ from app.services import rag_service
 logger = structlog.get_logger(__name__)
 
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# llama-3.3-70b-versatile was decommissioned from Groq's catalog (reproduced
+# live: "does not exist or you do not have access to it") — every chat
+# turn and every suggested-questions call was silently failing. gpt-oss-120b
+# is Groq's closest current equivalent in capability. It's a reasoning
+# model — its "thinking" tokens count against max_tokens and land in a
+# separate `reasoning` field, not `content`; at low reasoning effort (the
+# right setting for "answer from these excerpts", not a hard multi-step
+# problem) this stays a small fraction of the budget, verified live.
+GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_REASONING_EFFORT = "low"
 
 MAX_HISTORY_TURNS = 4     # keep last N user+assistant pairs in context
 SUGGEST_EXCERPT   = 3_000 # chars fed to question-suggestion prompt
@@ -47,7 +56,8 @@ Rules:
 - Use markdown: **bold** key values, tables for structured data, \
 bullet lists for multi-part answers.
 - Be thorough but concise. Lead with the direct answer.
-- When citing information, mention which excerpt it came from (e.g. "Excerpt 2").
+- Do not invent excerpt numbers or citations — only reference an excerpt \
+number if you are certain which one the fact came from.
 
 --- DOCUMENT EXCERPTS (most relevant sections) ---
 {context}
@@ -89,17 +99,24 @@ async def _groq_call(
                     "Content-Type":  "application/json",
                 },
                 json={
-                    "model":       GROQ_MODEL,
-                    "messages":    messages,
-                    "max_tokens":  max_tokens,
-                    "temperature": temperature,
+                    "model":            GROQ_MODEL,
+                    "messages":         messages,
+                    "max_tokens":       max_tokens,
+                    "temperature":      temperature,
+                    "reasoning_effort": GROQ_REASONING_EFFORT,
                 },
             )
             data = resp.json()
             if resp.status_code != 200:
                 err = data.get("error", {})
                 return {"content": None, "error": err.get("message", f"Groq {resp.status_code}")}
-            return {"content": data["choices"][0]["message"]["content"], "error": None}
+            content = data["choices"][0]["message"]["content"]
+            if not content:
+                # Reasoning consumed the whole max_tokens budget before any
+                # visible output — surface a real error instead of an
+                # empty bubble the user can't do anything about.
+                return {"content": None, "error": "The model ran out of room to answer — try a shorter question."}
+            return {"content": content, "error": None}
     except Exception as exc:
         return {"content": None, "error": str(exc)}
 

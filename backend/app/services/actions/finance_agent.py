@@ -6,6 +6,7 @@ Handles all finance document actions:
   - validate_invoice          → Pure Claude reasoning
   - generate_financial_report → Pure Claude reasoning
   - send_payment_reminder     → Email MCP
+  - flag_expense_anomalies    → Accounting MCP (read-only history) + reasoning
 """
 
 import structlog
@@ -15,7 +16,13 @@ from app.services.mcp.registry import call_mcp_tool
 
 logger = structlog.get_logger(__name__)
 
-_NO_APPROVAL_ACTIONS = frozenset({"validate_invoice", "generate_financial_report"})
+# flag_expense_anomalies reads the user's own ledger and writes nothing —
+# no side effect for the user to approve.
+_NO_APPROVAL_ACTIONS = frozenset({
+    "validate_invoice",
+    "generate_financial_report",
+    "flag_expense_anomalies",
+})
 
 _TOOLS: dict[str, list[dict]] = {
 
@@ -88,6 +95,43 @@ _TOOLS: dict[str, list[dict]] = {
         },
     ],
 
+    "flag_expense_anomalies": [
+        {
+            "name": "get_vendor_spend_history",
+            "description": (
+                "Retrieve the user's prior posted expenses for a vendor, plus their "
+                "overall expense baseline. Call this FIRST — it is what turns "
+                "'this looks high' into a measured comparison against real spend. "
+                "A vendor with no prior history returns matched_entry_count 0, which "
+                "is a legitimate finding (first-time vendor), not an error."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "vendor_name": {
+                        "type": "string",
+                        "description": "Vendor name exactly as it appears on the invoice.",
+                    },
+                },
+                "required": ["vendor_name"],
+            },
+        },
+        {
+            "name": "list_known_vendors",
+            "description": (
+                "List vendors known to the accounting system. Use to check whether "
+                "the invoice's vendor is an established one or previously unseen."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Optional category filter"},
+                },
+                "required": [],
+            },
+        },
+    ],
+
     "validate_invoice": [],
     "generate_financial_report": [],
 }
@@ -115,6 +159,31 @@ class FinanceAgent(BaseAgent):
             "From the extracted financial document data, generate a concise executive-level "
             "financial report. Include: key figures, period, trends if apparent, and a "
             "3-5 point summary of financial health indicators. Format as structured JSON."
+        ),
+        "flag_expense_anomalies": (
+            "Assess whether this invoice is unusual for this user, and say why.\n\n"
+            "Call get_vendor_spend_history first with the invoice's vendor name. "
+            "Everything you claim about what is 'normal' must come from the numbers "
+            "it returns — never invent a benchmark or reason from what invoices "
+            "typically cost in general.\n\n"
+            "Look for:\n"
+            "- Amount well outside this vendor's own range. Quote the actual "
+            "multiple and the figures behind it ('$4,200 vs. a $1,380 average "
+            "across 6 prior invoices').\n"
+            "- A first-time vendor, or one absent from the known-vendor list.\n"
+            "- A duplicate: same vendor, same amount, same or near invoice number "
+            "already in the recent entries.\n"
+            "- Internal inconsistency — line items not summing to the total, tax "
+            "that doesn't match the rate, a date in the future.\n"
+            "- Round-number or otherwise odd amounts inconsistent with past billing.\n\n"
+            "Return structured findings, each with a severity of 'high' | 'medium' | "
+            "'low', the specific figures it rests on, and what to check. Order most "
+            "severe first.\n\n"
+            "Be honest about the evidence. With little or no history for this vendor, "
+            "say the baseline is too thin to judge the amount rather than reporting a "
+            "confident anomaly from one data point — and if nothing stands out, say "
+            "the invoice looks consistent with prior spend instead of padding the "
+            "report with weak findings. A flag is a prompt to look, not an accusation."
         ),
         "send_payment_reminder": (
             "Extract the invoice details from the document. The recipient's email "
@@ -171,6 +240,15 @@ class FinanceAgent(BaseAgent):
             data_used["recipient_email"] = recipient_email
             risk = "low"
 
+        elif action_type == "flag_expense_anomalies":
+            steps = [
+                ActionPlanStep(step_number=1, description=f"Retrieve your prior spend history for {vendor}", requires_external_call=True, is_reversible=True, tool_name="get_vendor_spend_history"),
+                ActionPlanStep(step_number=2, description=f"Compare this {currency} {amount} invoice against that baseline", requires_external_call=False, is_reversible=True, tool_name=None),
+            ]
+            external = ["accounting_api"]
+            data_used = {k: ctx.get(k) for k in ["vendor_name", "total_amount", "currency", "invoice_number", "invoice_date"] if ctx.get(k)}
+            risk = "low"
+
         else:
             steps = [
                 ActionPlanStep(step_number=1, description=f"Analyse document and produce {action_type.replace('_', ' ')}", requires_external_call=False, is_reversible=True, tool_name=None),
@@ -189,7 +267,10 @@ class FinanceAgent(BaseAgent):
         )
 
     async def _execute_tool(self, tool_name: str, tool_input: dict, state: AgentState) -> ToolResult:
-        accounting_tools = {"list_accounting_accounts", "create_expense"}
+        accounting_tools = {
+            "list_accounting_accounts", "create_expense",
+            "get_vendor_spend_history", "list_known_vendors",
+        }
         email_tools = {"send_payment_reminder_email"}
 
         try:
@@ -197,14 +278,16 @@ class FinanceAgent(BaseAgent):
                 mcp_map = {
                     "list_accounting_accounts": "get_account_list",
                     "create_expense": "create_expense",
+                    "get_vendor_spend_history": "get_vendor_history",
+                    "list_known_vendors": "list_vendors",
                 }
                 creds = self.user_mcp_credentials.get("accounting_api")
                 # accounting_api is self-hosted against our own DB (no
-                # per-user credential) — the write tool needs our internal
-                # user_id to scope the ledger entry, which the LLM never
-                # supplies itself.
+                # per-user credential) — the tools that touch this user's own
+                # ledger need our internal user_id to scope them, which the
+                # LLM never supplies itself.
                 call_args = tool_input
-                if tool_name == "create_expense":
+                if tool_name in ("create_expense", "get_vendor_spend_history"):
                     call_args = {**tool_input, "user_id": state["user_id"]}
                 result = await call_mcp_tool("accounting_api", mcp_map[tool_name], call_args, creds)
 

@@ -87,6 +87,7 @@ async def call_tool(payload: MCPCallRequest):
         "get_medicine_details": _get_medicine_details,
         "create_order": _create_order,
         "get_order_status": _get_order_status,
+        "get_order_history": _get_order_history,
         "cancel_order": _cancel_order,
     }
     handler = handlers.get(payload.tool)
@@ -208,6 +209,51 @@ async def _get_order_status(args: dict) -> dict:
     return _ok_response({
         "order_id": order.id, "status": order.status, "total_amount": order.total_amount,
         "items": order.items, "created_at": order.created_at.isoformat(),
+    })
+
+
+async def _get_order_history(args: dict) -> dict:
+    """
+    Args: user_id (injected), optional limit (default 50).
+
+    Returns the distinct medicines this user has actually ordered through
+    the platform, most recently ordered first. This is what grounds
+    healthcare's check_medication_interactions in a real medication list —
+    without it the agent would be reasoning about drugs the user merely
+    might be taking. Cancelled orders are excluded: a cancelled order is
+    not something the patient is on.
+    """
+    user_id = args.get("user_id")
+    if not user_id:
+        return _error_response("get_order_history requires 'user_id' (internal — not an agent-supplied field).")
+    limit = args.get("limit") or 50
+
+    async with AsyncSessionLocal() as db:
+        orders = (await db.execute(
+            select(PharmacyOrder)
+            .where(PharmacyOrder.user_id == user_id, PharmacyOrder.status != "cancelled")
+            .order_by(PharmacyOrder.created_at.desc())
+            .limit(limit)
+        )).scalars().all()
+
+    # Collapse to one row per medicine — a repeat order of the same drug is
+    # the same medication, not a second one. dict preserves insertion order,
+    # so first-seen (= most recent, given the ordering above) wins.
+    medications: dict[str, dict] = {}
+    for order in orders:
+        for item in (order.items or []):
+            name = (item.get("medicine_name") or "").strip()
+            if not name or name.lower() in medications:
+                continue
+            medications[name.lower()] = {
+                "medicine_name": name,
+                "dosage": item.get("dosage"),
+                "last_ordered": order.created_at.isoformat(),
+            }
+
+    return _ok_response({
+        "order_count": len(orders),
+        "medications": list(medications.values()),
     })
 
 

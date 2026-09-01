@@ -199,6 +199,7 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
             "get_medicine_details",
             "create_order",
             "get_order_status",
+            "get_order_history",
             "cancel_order",
         }),
         timeout_seconds=30,
@@ -241,6 +242,7 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
             "get_account_list",
             "create_journal_entry",
             "export_report",
+            "get_vendor_history",
         }),
         timeout_seconds=25,
         max_retries=3,
@@ -297,6 +299,9 @@ ACTION_TO_MCP_SERVICES: dict[str, list[str]] = {
     # Healthcare
     "book_appointment":          ["google_calendar"],
     "order_medicines":           ["pharmacy_api"],
+    # Read-only: pulls the patient's real order history to check the new
+    # prescription against, rather than guessing what they're already on.
+    "check_medication_interactions": ["pharmacy_api"],
     "create_medication_schedule": [],
     "explain_prescription":      [],
     "medical_assistant":         [],
@@ -312,6 +317,9 @@ ACTION_TO_MCP_SERVICES: dict[str, list[str]] = {
     "validate_invoice":          [],
     "generate_financial_report": [],
     "send_payment_reminder":     ["email_api"],
+    # Read-only: compares this invoice against the user's own posted
+    # ledger so the "unusual" verdict is measured, not asserted.
+    "flag_expense_anomalies":    ["accounting_api"],
     # Legal
     "summarize_document":        [],
     "extract_key_clauses":       [],

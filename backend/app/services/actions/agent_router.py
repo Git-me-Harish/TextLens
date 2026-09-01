@@ -25,6 +25,7 @@ from app.services.actions.finance_agent import FinanceAgent
 from app.services.actions.government_agent import GovernmentAgent
 from app.services.actions.healthcare_agent import HealthcareAgent
 from app.services.actions.legal_agent import LegalAgent
+from app.services.actions.logistics_agent import LogisticsAgent
 from app.services.mcp.credential_store import get_credential
 from app.services.mcp.registry import get_required_services, get_server
 
@@ -38,6 +39,7 @@ _DOMAIN_AGENT_MAP: dict[str, type[BaseAgent]] = {
     "hr":         CareerAgent,
     "finance":    FinanceAgent,
     "legal":      LegalAgent,
+    "logistics":  LogisticsAgent,
     "government": GovernmentAgent,
     "education":  EducationAgent,
 }

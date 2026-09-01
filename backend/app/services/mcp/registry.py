@@ -120,9 +120,9 @@ class CircuitBreaker:
             )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # MCP Server definition
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 @dataclass
 class MCPServerDef:
@@ -146,24 +146,24 @@ class MCPServerDef:
         return self._circuit
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Registry — all known MCP servers
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 #
 # HOW TO ADD A NEW MCP SERVER:
-#   1. Add a MCPServerDef entry below.
-#   2. Add the server's tool names to allowed_tools.
-#   3. Add the action_type → service_name mapping to ACTION_TO_MCP_SERVICES.
-#   4. Add the credential schema to SaveCredentialRequest in action_schemas.py.
-#   5. Deploy your MCP server (self-hosted or cloud).
+#  1. Add a MCPServerDef entry below.
+#  2. Add the server's tool names to allowed_tools.
+#  3. Add the action_type → service_name mapping to ACTION_TO_MCP_SERVICES.
+#  4. Add the credential schema to SaveCredentialRequest in action_schemas.py.
+#  5. Deploy your MCP server (self-hosted or cloud).
 #
 # Each MCP server must implement the MCP SSE transport spec:
-#   POST {base_url}/call  — JSON body: { tool: str, arguments: dict }
-#   Response: { result: any, error: str | null }
+#  POST {base_url}/call  — JSON body: { tool: str, arguments: dict }
+#  Response: { result: any, error: str | null }
 
 MCP_REGISTRY: dict[str, MCPServerDef] = {
 
-    # ── Google Calendar MCP ───────────────────────────────────────────────
+    # Google Calendar MCP 
     # Self-hosted or use: https://github.com/googleapis/mcp-server-calendar
     "google_calendar": MCPServerDef(
         service_name="google_calendar",
@@ -182,7 +182,7 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
         max_retries=2,
     ),
 
-    # ── Pharmacy / Medicine ordering MCP ─────────────────────────────────
+    # Pharmacy / Medicine ordering MCP 
     # Self-hosted (app/api/routes/mcp_pharmacy.py) against this app's own
     # database — no real pharmacy partner account (e.g. 1mg, PharmacyBee)
     # exists to integrate against. credential_key=None means agent_router
@@ -205,7 +205,7 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
         max_retries=3,
     ),
 
-    # ── Job Board MCP ─────────────────────────────────────────────────────
+    # Job Board MCP 
     # Self-hosted (app/api/routes/mcp_job_board.py) against this app's own
     # database — LinkedIn/Indeed/Glassdoor partner APIs are gated behind
     # paid/approved access this project doesn't have.
@@ -225,7 +225,7 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
         max_retries=2,
     ),
 
-    # ── Accounting MCP ────────────────────────────────────────────────────
+    # Accounting MCP 
     # Self-hosted (app/api/routes/mcp_accounting.py) against this app's own
     # database — QuickBooks/Xero/Zoho Books require a registered developer
     # app and OAuth approval this project doesn't have.
@@ -246,7 +246,7 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
         max_retries=3,
     ),
 
-    # ── Email MCP ─────────────────────────────────────────────────────────
+    # Email MCP 
     # Implemented locally (app/api/routes/mcp_email.py) against the platform's
     # own Resend account (settings.RESEND_API_KEY) — not a per-user credential.
     # credential_key=None means agent_router.get_agent() never asks the user
@@ -288,6 +288,8 @@ NO_CREDENTIAL_SERVICES: frozenset[str] = frozenset({
     "generate_study_material",
     "generate_quiz",
     "create_learning_plan",
+    "summarize_shipment",
+    "flag_customs_risks",
 })
 
 # Which action_type maps to which MCP server(s)
@@ -315,6 +317,12 @@ ACTION_TO_MCP_SERVICES: dict[str, list[str]] = {
     "extract_key_clauses":       [],
     "track_obligations":         ["google_calendar"],
     "document_qa":               [],
+    # Logistics
+    "track_shipment":            ["google_calendar"],
+    "notify_consignee":          ["email_api"],
+    "record_po_expense":         ["accounting_api"],
+    "summarize_shipment":        [],
+    "flag_customs_risks":        [],
     # Government
     "summarize_filing":          [],
     "extract_obligations":       [],
@@ -340,9 +348,9 @@ def get_required_services(action_type: str) -> list[str]:
     return ACTION_TO_MCP_SERVICES.get(action_type, [])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # MCP HTTP client — the actual call layer
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 async def call_mcp_tool(
     service_name: str,

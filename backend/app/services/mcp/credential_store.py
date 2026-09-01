@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.action_models import UserMCPCredential
+from app.services.mcp.token_refresh import is_expired, refresh_google_token
 
 logger = structlog.get_logger(__name__)
 
@@ -141,8 +142,15 @@ async def get_credential(
     if not row:
         return None
 
+    # Captured up front and used for every read below. A failed commit in
+    # either the refresh or the rotation block gets rolled back, and a
+    # rollback expires the ORM instance's attributes — reading row.key_version
+    # afterwards would then fire a lazy load, which raises MissingGreenlet
+    # under async SQLAlchemy. Reading it once here avoids that entirely.
+    key_version = row.key_version
+
     try:
-        decrypted = _decrypt(row.encrypted_credentials, row.iv, row.key_version)
+        decrypted = _decrypt(row.encrypted_credentials, row.iv, key_version)
     except Exception as exc:
         logger.error(
             "mcp.credential.decrypt_failed",
@@ -152,10 +160,38 @@ async def get_credential(
         )
         return None
 
+    # Google access tokens expire after ~1 hour. Refresh here rather than in
+    # the MCP proxy route: this is the layer that already holds the DB session
+    # and the encrypted blob, so the proxy keeps its "never touches the DB"
+    # boundary. See token_refresh.py for the full reasoning.
+    #
+    # A single `if` rather than a service→refresher registry on purpose —
+    # google_calendar is the only OAuth service in the registry; every other
+    # one is self-hosted with no per-user credential. Generalise if a second
+    # one ever appears.
+    if service_name == "google_calendar" and is_expired(decrypted):
+        refreshed = await refresh_google_token(decrypted)
+        if refreshed:
+            decrypted = refreshed
+            try:
+                new_ct, new_iv = _encrypt(decrypted, key_version)
+                row.encrypted_credentials = new_ct
+                row.iv = new_iv
+                await db.commit()
+                logger.info("mcp.credential.token_refreshed", user_id=user_id, service_name=service_name)
+            except Exception as exc:
+                # The in-memory token is still valid for this call even if we
+                # failed to persist it — don't fail the caller over this.
+                await db.rollback()
+                logger.warning("mcp.credential.refresh_persist_failed", error=str(exc))
+        # On refresh failure the stale credential is returned unchanged: the
+        # MCP call then 401s and registry.py surfaces the existing
+        # "check your connected credentials" message, same as before.
+
     # Lazy key rotation: if stored with old version, re-encrypt with current key
     current_version = settings.MCP_KEY_VERSION
-    if row.key_version != current_version:
-        old_version = row.key_version
+    if key_version != current_version:
+        old_version = key_version
         try:
             new_ct, new_iv = _encrypt(decrypted, current_version)
             row.encrypted_credentials = new_ct
@@ -170,7 +206,9 @@ async def get_credential(
                 new_version=current_version,
             )
         except Exception as exc:
-            # Rotation failure is non-fatal — credential is still usable
+            # Rotation failure is non-fatal — credential is still usable.
+            # Roll back so the caller isn't handed a dirty session.
+            await db.rollback()
             logger.warning("mcp.credential.rotation_failed", error=str(exc))
 
     return decrypted

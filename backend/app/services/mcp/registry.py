@@ -21,7 +21,7 @@ Replace base_url values with your actual deployed MCP server URLs.
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -29,6 +29,7 @@ import httpx
 import structlog
 
 from app.core.config import settings
+from app.db.redis import get_redis
 
 logger = structlog.get_logger(__name__)
 
@@ -42,56 +43,81 @@ class CircuitState(str, Enum):
 @dataclass
 class CircuitBreaker:
     """
-    Per-server circuit breaker.
-    Thread-safe via asyncio.Lock — all agents are async.
+    Per-server circuit breaker, state shared in Redis across every Celery
+    worker process (and the FastAPI process, if it ever calls an MCP tool
+    directly) — not per-process in-memory.
+
+    The original in-memory version (a dataclass field + asyncio.Lock) only
+    ever protected the ONE process it lived in: with multiple Celery
+    workers (or even a single worker restarting), each process had its own
+    independent failure count and OPEN/CLOSED state, so a service failing
+    hard against worker A would keep getting hammered by workers B/C/D —
+    exactly the scenario a circuit breaker exists to prevent. wall-clock
+    time.time() (not time.monotonic(), which is only comparable within one
+    process) is used so the OPEN timestamp is meaningful when read back by
+    a different process.
+
+    HALF_OPEN's "exactly one probe call" guarantee is enforced with a
+    short-lived Redis SET NX (`probe_lock`) — whichever process's call_allowed()
+    wins that race is the only one that proceeds while the circuit is
+    recovering; everyone else still sees OPEN until the probe resolves.
     """
     service_name: str
     failure_threshold: int = 5
     recovery_seconds: int = 60
 
-    state: CircuitState = CircuitState.CLOSED
-    failure_count: int = 0
-    last_failure_ts: float = 0.0
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    def _keys(self) -> dict[str, str]:
+        prefix = f"mcp_circuit:{self.service_name}"
+        return {
+            "state": f"{prefix}:state",
+            "failures": f"{prefix}:failures",
+            "opened_at": f"{prefix}:opened_at",
+            "probe_lock": f"{prefix}:probe_lock",
+        }
 
     async def call_allowed(self) -> bool:
-        async with self._lock:
-            if self.state == CircuitState.CLOSED:
-                return True
-            if self.state == CircuitState.OPEN:
-                elapsed = time.monotonic() - self.last_failure_ts
-                if elapsed >= self.recovery_seconds:
-                    self.state = CircuitState.HALF_OPEN
-                    logger.info(
-                        "circuit_breaker.half_open",
-                        service=self.service_name,
-                    )
-                    return True
-                return False
-            # HALF_OPEN — allow the probe
-            return True
+        redis = await get_redis()
+        keys = self._keys()
+
+        state = await redis.get(keys["state"])
+        if state != CircuitState.OPEN.value:
+            return True  # CLOSED (or no state recorded yet)
+
+        opened_at = await redis.get(keys["opened_at"])
+        elapsed = time.time() - float(opened_at or 0)
+        if elapsed < self.recovery_seconds:
+            return False
+
+        # Recovery window elapsed — at most one process gets to probe.
+        got_probe = await redis.set(keys["probe_lock"], "1", nx=True, ex=max(self.recovery_seconds, 30))
+        if got_probe:
+            logger.info("circuit_breaker.half_open", service=self.service_name)
+        return bool(got_probe)
 
     async def record_success(self) -> None:
-        async with self._lock:
-            self.failure_count = 0
-            if self.state != CircuitState.CLOSED:
-                logger.info("circuit_breaker.closed", service=self.service_name)
-            self.state = CircuitState.CLOSED
+        redis = await get_redis()
+        keys = self._keys()
+        was_open = await redis.get(keys["state"]) == CircuitState.OPEN.value
+        await redis.delete(keys["state"], keys["failures"], keys["opened_at"], keys["probe_lock"])
+        if was_open:
+            logger.info("circuit_breaker.closed", service=self.service_name)
 
     async def record_failure(self) -> None:
-        async with self._lock:
-            self.failure_count += 1
-            self.last_failure_ts = time.monotonic()
-            if (
-                self.state == CircuitState.HALF_OPEN
-                or self.failure_count >= self.failure_threshold
-            ):
-                self.state = CircuitState.OPEN
-                logger.warning(
-                    "circuit_breaker.open",
-                    service=self.service_name,
-                    failure_count=self.failure_count,
-                )
+        redis = await get_redis()
+        keys = self._keys()
+
+        failures = await redis.incr(keys["failures"])
+        is_probe_failure = bool(await redis.get(keys["probe_lock"]))
+
+        if is_probe_failure or failures >= self.failure_threshold:
+            await redis.set(keys["state"], CircuitState.OPEN.value)
+            await redis.set(keys["opened_at"], str(time.time()))
+            await redis.delete(keys["probe_lock"])
+            logger.warning(
+                "circuit_breaker.open",
+                service=self.service_name,
+                failure_count=failures,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,12 +183,16 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
     ),
 
     # ── Pharmacy / Medicine ordering MCP ─────────────────────────────────
-    # Implement against your pharmacy partner API (e.g. 1mg, PharmacyBee)
+    # Self-hosted (app/api/routes/mcp_pharmacy.py) against this app's own
+    # database — no real pharmacy partner account (e.g. 1mg, PharmacyBee)
+    # exists to integrate against. credential_key=None means agent_router
+    # never asks the user to connect anything for this service, same as
+    # email_api.
     "pharmacy_api": MCPServerDef(
         service_name="pharmacy_api",
         base_url=settings.PHARMACY_MCP_URL,
-        auth_strategy="api_key_header",  # X-API-Key: {user's pharmacy_api_key}
-        credential_key="pharmacy_api",
+        auth_strategy="none",
+        credential_key=None,
         allowed_tools=frozenset({
             "search_medicines",
             "check_medicine_availability",
@@ -176,12 +206,14 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
     ),
 
     # ── Job Board MCP ─────────────────────────────────────────────────────
-    # Implement against LinkedIn/Indeed/Glassdoor partner APIs
+    # Self-hosted (app/api/routes/mcp_job_board.py) against this app's own
+    # database — LinkedIn/Indeed/Glassdoor partner APIs are gated behind
+    # paid/approved access this project doesn't have.
     "job_board_api": MCPServerDef(
         service_name="job_board_api",
         base_url=settings.JOB_BOARD_MCP_URL,
-        auth_strategy="api_key_header",
-        credential_key="job_board_api",
+        auth_strategy="none",
+        credential_key=None,
         allowed_tools=frozenset({
             "search_jobs",
             "get_job_details",
@@ -194,12 +226,14 @@ MCP_REGISTRY: dict[str, MCPServerDef] = {
     ),
 
     # ── Accounting MCP ────────────────────────────────────────────────────
-    # Implement against QuickBooks / Xero / Zoho Books MCP servers
+    # Self-hosted (app/api/routes/mcp_accounting.py) against this app's own
+    # database — QuickBooks/Xero/Zoho Books require a registered developer
+    # app and OAuth approval this project doesn't have.
     "accounting_api": MCPServerDef(
         service_name="accounting_api",
         base_url=settings.ACCOUNTING_MCP_URL,
-        auth_strategy="bearer",
-        credential_key="accounting_api",
+        auth_strategy="none",
+        credential_key=None,
         allowed_tools=frozenset({
             "create_expense",
             "create_invoice",
@@ -270,6 +304,7 @@ ACTION_TO_MCP_SERVICES: dict[str, list[str]] = {
     "apply_to_job":              ["job_board_api", "email_api"],
     "optimize_resume":           [],
     "generate_interview_prep":   [],
+    "schedule_interview":        ["google_calendar"],
     # Finance
     "create_expense_entry":      ["accounting_api"],
     "validate_invoice":          [],
@@ -284,10 +319,12 @@ ACTION_TO_MCP_SERVICES: dict[str, list[str]] = {
     "summarize_filing":          [],
     "extract_obligations":       [],
     "flag_risks":                [],
+    "track_filing_deadlines":    ["google_calendar"],
     # Education
     "generate_study_material":   [],
     "generate_quiz":             [],
     "create_learning_plan":      [],
+    "schedule_study_sessions":   ["google_calendar"],
 }
 
 

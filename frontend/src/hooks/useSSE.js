@@ -143,7 +143,15 @@ export function waitForJobSSE(jobId, api, timeoutMs = 5 * 60_000) {
         settled = true;
         unsub();
         clearTimeout(timer);
-        resolve(data);
+        // The job_update SSE payload carries the id as `job_id`, not `id`
+        // (see worker/tasks.py's _publish_sse calls) — every caller expects
+        // `.id` (matching the REST fallback below and GET /jobs/{id}, both
+        // of which use JobOut's `id` field). Without this, `.id` is
+        // `undefined` whenever SSE resolves the fast path — silently
+        // breaking every subsequent call that needs the job id (agents/run,
+        // chat session creation, etc.), since axios/JSON.stringify just
+        // drops an undefined field instead of sending job_id: null.
+        resolve({ ...data, id: jobId });
       }
     });
 
@@ -172,7 +180,9 @@ export function waitForAgentSSE(runId, api, timeoutMs = 10 * 60_000) {
         settled = true;
         unsub();
         clearTimeout(timer);
-        resolve(data);
+        // Same fix as waitForJobSSE above — the agent_update SSE payload
+        // carries the id as `run_id`, not `id`.
+        resolve({ ...data, id: runId });
       }
     });
 

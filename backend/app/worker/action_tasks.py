@@ -52,10 +52,41 @@ from app.services.approval_service import (
     generate_approval_token,
     store_approval_token,
 )
+from app.db.redis import get_redis
 from app.services.notification_service import create_notification, format_action_notification
 from app.services.sse_service import publish_event as _publish_global_sse
 
 logger = structlog.get_logger(__name__)
+
+# Slightly longer than the tasks' own time_limit=330s, so a lock held by a
+# genuinely-still-running task never expires out from under it.
+_ACTION_LOCK_TTL_SECONDS = 360
+
+
+async def _acquire_action_lock(action_run_id: str) -> bool:
+    """
+    Distributed lock preventing the same action_run_id from being executed
+    by two workers at once.
+
+    celery_app.py sets task_acks_late=True + task_reject_on_worker_lost=True
+    deliberately (so a task survives a worker crash and gets redelivered
+    instead of silently vanishing) — but that means the *same* action can
+    be redelivered to a second worker while the first is still running
+    (Redis broker visibility-timeout redelivery, or a worker that's merely
+    slow rather than dead) or after the first crashed mid-run. Without this
+    guard, a redelivered task would call agent.run()/resume_after_approval()
+    a second time and could place a second real order/expense/appointment
+    through an MCP tool that has no idempotency key of its own to dedupe on
+    its side — pharmacy/job-board/accounting are all self-hosted here and
+    take whatever they're sent at face value.
+    """
+    redis = await get_redis()
+    return bool(await redis.set(f"action_lock:{action_run_id}", "1", nx=True, ex=_ACTION_LOCK_TTL_SECONDS))
+
+
+async def _release_action_lock(action_run_id: str) -> None:
+    redis = await get_redis()
+    await redis.delete(f"action_lock:{action_run_id}")
 
 
 async def _notify_global(db: AsyncSession, run: ActionRun, status: str, error_message: str | None = None) -> None:
@@ -177,6 +208,17 @@ def execute_action_task(self, action_run_id: str, user_id: str) -> dict:
 
 async def _execute_action_async(action_run_id: str, user_id: str) -> dict:
     log = logger.bind(action_run_id=action_run_id, user_id=user_id)
+
+    if not await _acquire_action_lock(action_run_id):
+        log.warning("action_task.duplicate_execution_blocked")
+        return {"status": "SKIPPED", "reason": "duplicate_delivery"}
+    try:
+        return await _execute_action_async_inner(action_run_id, user_id, log)
+    finally:
+        await _release_action_lock(action_run_id)
+
+
+async def _execute_action_async_inner(action_run_id: str, user_id: str, log) -> dict:
     log.info("action_task.started")
 
     async with AsyncSessionLocal() as db:
@@ -303,6 +345,17 @@ def resume_action_task(self, action_run_id: str, user_id: str) -> dict:
 
 async def _resume_action_async(action_run_id: str, user_id: str) -> dict:
     log = logger.bind(action_run_id=action_run_id, user_id=user_id, resumed=True)
+
+    if not await _acquire_action_lock(action_run_id):
+        log.warning("resume_task.duplicate_execution_blocked")
+        return {"status": "SKIPPED", "reason": "duplicate_delivery"}
+    try:
+        return await _resume_action_async_inner(action_run_id, user_id, log)
+    finally:
+        await _release_action_lock(action_run_id)
+
+
+async def _resume_action_async_inner(action_run_id: str, user_id: str, log) -> dict:
     log.info("resume_task.started")
 
     async with AsyncSessionLocal() as db:

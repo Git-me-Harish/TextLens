@@ -6,6 +6,12 @@ Tables owned here:
   - ActionRun        — lifecycle record per user-initiated action
   - AgentTrace       — immutable per-step observability log
   - UserMCPCredential — encrypted external service credentials
+  - PharmacyOrder, JobApplication, AccountingEntry — persisted state for the
+    self-hosted pharmacy/job-board/accounting MCP proxies (see
+    api/routes/mcp_pharmacy.py, mcp_job_board.py, mcp_accounting.py). These
+    are real, own-backend stand-ins for services this app has no actual
+    partner account with — same pattern as email_api (own Resend account)
+    rather than google_calendar (per-user OAuth to a real third party).
 """
 import uuid
 from datetime import datetime
@@ -195,4 +201,112 @@ class UserMCPCredential(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "service_name", name="uq_user_mcp_credentials_user_service"),
+    )
+
+
+class PharmacyOrder(Base):
+    """Persisted order placed through the self-hosted pharmacy MCP proxy."""
+    __tablename__ = "pharmacy_orders"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # [{medicine_name, dosage, quantity, unit_price, line_total}]
+    items: Mapped[list] = mapped_column(JSONB, nullable=False)
+    total_amount: Mapped[float] = mapped_column(nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    delivery_address_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="confirmed",
+        comment="confirmed|shipped|delivered|cancelled",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow,
+        onupdate=datetime.utcnow, nullable=False,
+    )
+
+
+class JobApplication(Base):
+    """Persisted application submitted through the self-hosted job-board MCP proxy."""
+    __tablename__ = "job_applications"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # References the in-module job catalog in mcp_job_board.py, not a DB table
+    # — the catalog is static seed data (a real job board's listings live on
+    # their side, not ours).
+    job_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    job_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    company_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    cover_letter: Mapped[str] = mapped_column(Text, nullable=False)
+    applicant_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    applicant_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="submitted",
+        comment="submitted|under_review|rejected|interview_scheduled",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow,
+        onupdate=datetime.utcnow, nullable=False,
+    )
+
+
+class AccountingEntry(Base):
+    """
+    Persisted ledger entry created through the self-hosted accounting MCP
+    proxy. One table for all three writable entry types (expense/invoice/
+    journal) — they share the same core shape (amount, currency, party,
+    line items) and querying "everything this user has booked" shouldn't
+    require a UNION across three tables.
+    """
+    __tablename__ = "accounting_entries"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    entry_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, comment="expense|invoice|journal",
+    )
+    party_name: Mapped[str] = mapped_column(
+        String(255), nullable=False, comment="vendor for expenses, customer for invoices",
+    )
+    amount: Mapped[float] = mapped_column(nullable=False)
+    tax_amount: Mapped[float] = mapped_column(nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    entry_date: Mapped[str] = mapped_column(String(10), nullable=False, comment="ISO 8601 date")
+    reference_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    line_items: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="posted", comment="posted|void",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_accounting_entries_user_type", "user_id", "entry_type"),
     )

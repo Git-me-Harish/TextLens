@@ -114,19 +114,19 @@ async def list_supported_services():
             "fields": {},
         },
         "pharmacy_api": {
-            "description": "Pharmacy API for medicine ordering",
-            "connection_type": "manual",
-            "fields": {"api_key": "Pharmacy API key", "base_url": "Optional custom base URL"},
+            "description": "Medicine search and ordering — runs on this platform's own catalog, nothing to connect.",
+            "connection_type": "system",
+            "fields": {},
         },
         "job_board_api": {
-            "description": "Job Board API for job search and application",
-            "connection_type": "manual",
-            "fields": {"api_key": "Job board API key"},
+            "description": "Job search and applications — runs on this platform's own listings, nothing to connect.",
+            "connection_type": "system",
+            "fields": {},
         },
         "accounting_api": {
-            "description": "Accounting API (QuickBooks/Xero/Zoho) for expense management",
-            "connection_type": "manual",
-            "fields": {"access_token": "OAuth2 access token", "company_id": "Accounting company/org ID"},
+            "description": "Expense/invoice tracking — runs on this platform's own ledger, nothing to connect.",
+            "connection_type": "system",
+            "fields": {},
         },
         "email_api": {
             "description": "Sends through this platform's own email account - nothing to connect.",

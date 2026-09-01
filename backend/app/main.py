@@ -33,8 +33,11 @@ from app.api.routes.chat import router as chat_router
 from app.api.routes.corrections import router as corrections_router
 from app.api.routes.credentials import router as credentials_router
 from app.api.routes.drive import router as drive_router
+from app.api.routes.mcp_accounting import router as mcp_accounting_router
 from app.api.routes.mcp_email import router as mcp_email_router
 from app.api.routes.mcp_google_calendar import router as mcp_google_calendar_router
+from app.api.routes.mcp_job_board import router as mcp_job_board_router
+from app.api.routes.mcp_pharmacy import router as mcp_pharmacy_router
 from app.api.routes.notifications import router as notifications_router
 from app.api.routes.schedules import router as schedules_router
 from app.api.routes.search import router as search_router
@@ -168,6 +171,9 @@ app.include_router(credentials_router, prefix=V1)
 # own user JWT.
 app.include_router(mcp_google_calendar_router)
 app.include_router(mcp_email_router)
+app.include_router(mcp_pharmacy_router)
+app.include_router(mcp_job_board_router)
+app.include_router(mcp_accounting_router)
 
 
 # Health endpoints

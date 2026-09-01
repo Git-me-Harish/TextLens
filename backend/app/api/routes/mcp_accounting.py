@@ -84,6 +84,7 @@ async def call_tool(payload: MCPCallRequest):
         "get_account_list": _get_account_list,
         "create_journal_entry": _create_journal_entry,
         "export_report": _export_report,
+        "get_vendor_history": _get_vendor_history,
     }
     handler = handlers.get(payload.tool)
     if handler is None:
@@ -200,6 +201,86 @@ async def _get_account_list(args: dict) -> dict:
     account_type = args.get("account_type")
     accounts = _ACCOUNTS if not account_type else [a for a in _ACCOUNTS if a["type"] == account_type]
     return _ok_response({"accounts": accounts})
+
+
+def _vendor_matches(entry_party: str, vendor_name: str) -> bool:
+    """
+    Invoice vendor strings are rarely byte-identical across documents
+    ("CloudHost", "CloudHost Inc.", "CLOUDHOST INC"), so exact equality
+    would report "no history" for a vendor the user has clearly paid
+    before — the worst possible failure for an anomaly check, since it
+    silently turns every invoice into a first-time one. Case-insensitive
+    containment either way is the pragmatic middle ground.
+    """
+    a, b = entry_party.strip().lower(), vendor_name.strip().lower()
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
+async def _get_vendor_history(args: dict) -> dict:
+    """
+    Args: user_id (injected), vendor_name (optional), limit (optional,
+    default 100 entries scanned).
+
+    Read-only spend history for the anomaly check in finance's
+    flag_expense_anomalies. Returns the vendor's own prior expenses AND
+    the user's overall expense baseline, so the agent can say "3x your
+    usual spend with this vendor" from real posted numbers rather than
+    inventing a benchmark. A vendor with no history is a legitimate,
+    reportable finding in its own right — that's returned as
+    matched_entry_count: 0, not an error.
+    """
+    user_id = args.get("user_id")
+    if not user_id:
+        return _error_response("get_vendor_history requires 'user_id' (internal — not an agent-supplied field).")
+    vendor_name = args.get("vendor_name")
+    limit = args.get("limit") or 100
+
+    async with AsyncSessionLocal() as db:
+        entries = (await db.execute(
+            select(AccountingEntry)
+            .where(
+                AccountingEntry.user_id == user_id,
+                AccountingEntry.entry_type == "expense",
+                AccountingEntry.status == "posted",
+            )
+            .order_by(AccountingEntry.created_at.desc())
+            .limit(limit)
+        )).scalars().all()
+
+    matched = [
+        e for e in entries
+        if vendor_name and _vendor_matches(e.party_name or "", vendor_name)
+    ]
+
+    def _stats(rows: list[AccountingEntry]) -> dict | None:
+        amounts = [e.amount for e in rows if e.amount is not None]
+        if not amounts:
+            return None
+        return {
+            "count": len(amounts),
+            "average_amount": round(sum(amounts) / len(amounts), 2),
+            "min_amount": round(min(amounts), 2),
+            "max_amount": round(max(amounts), 2),
+        }
+
+    return _ok_response({
+        "vendor_name": vendor_name,
+        "matched_entry_count": len(matched),
+        "vendor_stats": _stats(matched),
+        "overall_expense_stats": _stats(entries),
+        # Recent matched entries so the agent can cite specific comparisons
+        # rather than only quoting an aggregate.
+        "recent_vendor_entries": [
+            {
+                "amount": e.amount, "currency": e.currency,
+                "entry_date": e.entry_date, "reference_number": e.reference_number,
+                "party_name": e.party_name,
+            }
+            for e in matched[:10]
+        ],
+    })
 
 
 async def _export_report(args: dict) -> dict:

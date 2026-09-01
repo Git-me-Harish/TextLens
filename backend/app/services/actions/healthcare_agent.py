@@ -4,6 +4,7 @@ Healthcare Domain Agent
 Handles all healthcare document actions:
   - book_appointment        → Google Calendar MCP
   - order_medicines         → Pharmacy MCP
+  - check_medication_interactions → Pharmacy MCP (read-only history) + reasoning
   - create_medication_schedule → Pure Claude reasoning (no external call)
   - explain_prescription    → Pure Claude reasoning
   - medical_assistant       → Pure Claude reasoning (conversational Q&A)
@@ -26,7 +27,43 @@ _NO_APPROVAL_ACTIONS = frozenset({
     "explain_prescription",
     "medical_assistant",
     "create_medication_schedule",
+    # Reads the patient's own order history and reasons over it — nothing
+    # leaves the platform and nothing is written, so there's no side effect
+    # for the user to approve.
+    "check_medication_interactions",
 })
+
+
+def _medications(ctx: dict) -> list[dict]:
+    """
+    Normalise the prescription's medication list to [{name, strength, instructions}].
+
+    The prescription pipeline (agent_service.py) emits `medications` with a
+    `drug_name` key. order_medicines was reading `medicines`/`name`, which
+    exists nowhere — so its plan preview silently showed zero pharmacy-search
+    steps and an empty medicine list for every prescription. Both key sets
+    are tolerated here rather than only the correct one: a bare string list
+    is also accepted, since a low-confidence extraction sometimes degrades
+    to that.
+    """
+    raw = ctx.get("medications") or ctx.get("medicines") or []
+    if not isinstance(raw, list):
+        return []
+
+    out: list[dict] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            out.append({"name": item.strip(), "strength": "", "instructions": ""})
+        elif isinstance(item, dict):
+            name = item.get("drug_name") or item.get("name")
+            if not name:
+                continue
+            out.append({
+                "name": str(name).strip(),
+                "strength": str(item.get("strength") or item.get("dosage") or ""),
+                "instructions": str(item.get("dosage_instructions") or ""),
+            })
+    return out
 
 # MCP tool definitions (Anthropic tool-use schema)
 _TOOLS: dict[str, list[dict]] = {
@@ -119,6 +156,33 @@ _TOOLS: dict[str, list[dict]] = {
         },
     ],
 
+    "check_medication_interactions": [
+        {
+            "name": "list_current_medications",
+            "description": (
+                "List the medicines this patient has previously ordered through this "
+                "platform — their existing medication list. Call this FIRST, before "
+                "assessing interactions, so the assessment is based on what the patient "
+                "is actually taking rather than assumptions. Returns an empty list if "
+                "the patient has no order history, which is itself worth reporting."
+            ),
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "get_medicine_details",
+            "description": (
+                "Look up catalog details for a single medicine by name — available "
+                "dosages, and whether it requires a prescription. Use to confirm a "
+                "drug name resolves to a real product before reasoning about it."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"medicine_name": {"type": "string"}},
+                "required": ["medicine_name"],
+            },
+        },
+    ],
+
     "create_medication_schedule": [],    # Pure reasoning — no tools needed
     "explain_prescription": [],          # Pure reasoning — no tools needed
     "medical_assistant": [],             # Pure reasoning — no tools needed
@@ -138,6 +202,31 @@ class HealthcareAgent(BaseAgent):
             "Extract every medicine from the prescription including name, dosage, and duration. "
             "Search for each medicine on the pharmacy, verify availability, then place a single "
             "consolidated order. Present the full order summary in your final result."
+        ),
+        "check_medication_interactions": (
+            "Review this prescription for drug-interaction and duplication risk.\n\n"
+            "First call list_current_medications to get what the patient is already "
+            "taking. Then assess, in this order:\n"
+            "1) Interactions BETWEEN the newly prescribed medicines themselves.\n"
+            "2) Interactions between each new medicine and each existing medicine.\n"
+            "3) Therapeutic duplication — the same drug, or two drugs of the same "
+            "class, appearing in both lists.\n"
+            "4) Dosage concerns visible in the prescription itself.\n\n"
+            "Return structured findings. For each one give: the medicines involved, "
+            "a severity of 'severe' | 'moderate' | 'minor', what the interaction "
+            "actually does, and what the patient should do about it. Order findings "
+            "most severe first. If you find nothing, say so plainly rather than "
+            "manufacturing a weak finding.\n\n"
+            "Two hard rules. Never tell the patient to stop, change, or adjust any "
+            "medication — that decision belongs to their prescriber, and your role is "
+            "to give them something specific to raise. And state clearly which "
+            "medicines you were and were not able to check: if the current-medication "
+            "list is empty or partial, the assessment covers only the prescription "
+            "itself, and the patient must be told that rather than left assuming it "
+            "was comprehensive.\n\n"
+            "Close with a short line that this is a documentation-review aid, not "
+            "medical advice, and that their pharmacist or doctor has their full "
+            "history and should confirm anything flagged here."
         ),
         "create_medication_schedule": (
             "From the prescription, build a detailed daily medication schedule in JSON. "
@@ -178,8 +267,7 @@ class HealthcareAgent(BaseAgent):
             risk = "low"
 
         elif action_type == "order_medicines":
-            medicines = ctx.get("medicines", [])
-            med_names = [m.get("name", "Unknown") if isinstance(m, dict) else str(m) for m in medicines[:5]]
+            med_names = [m["name"] for m in _medications(ctx)[:5]]
             steps = [
                 ActionPlanStep(step_number=i + 1, description=f"Search pharmacy for: {name}", requires_external_call=True, is_reversible=True, tool_name="search_medicines")
                 for i, name in enumerate(med_names)
@@ -189,6 +277,24 @@ class HealthcareAgent(BaseAgent):
             external = ["pharmacy_api"]
             data_used = {"medicines": med_names, "patient": ctx.get("patient_name")}
             risk = "medium"
+
+        elif action_type == "check_medication_interactions":
+            meds = _medications(ctx)
+            if not meds:
+                raise ValueError(
+                    "No medicines could be read from this prescription, so there's "
+                    "nothing to check for interactions. This usually means the "
+                    "document didn't extract cleanly — try re-running the "
+                    "prescription analysis on a clearer scan."
+                )
+            med_names = [m["name"] for m in meds]
+            steps = [
+                ActionPlanStep(step_number=1, description="Retrieve your existing medication list from past orders", requires_external_call=True, is_reversible=True, tool_name="list_current_medications"),
+                ActionPlanStep(step_number=2, description=f"Check {len(med_names)} prescribed medicine(s) for interactions and duplication", requires_external_call=False, is_reversible=True, tool_name=None),
+            ]
+            external = ["pharmacy_api"]
+            data_used = {"prescribed_medicines": med_names, "patient": ctx.get("patient_name")}
+            risk = "low"
 
         else:
             # Reasoning-only actions — no approval needed, but we still produce a plan
@@ -211,7 +317,10 @@ class HealthcareAgent(BaseAgent):
     async def _execute_tool(self, tool_name: str, tool_input: dict, state: AgentState) -> ToolResult:
         """Route tool calls to the correct MCP server."""
         calendar_tools = {"check_calendar_availability", "create_calendar_event"}
-        pharmacy_tools = {"search_medicines", "create_medicine_order"}
+        pharmacy_tools = {
+            "search_medicines", "create_medicine_order",
+            "list_current_medications", "get_medicine_details",
+        }
 
         try:
             if tool_name in calendar_tools:
@@ -227,13 +336,16 @@ class HealthcareAgent(BaseAgent):
                 mcp_tool = {
                     "search_medicines": "search_medicines",
                     "create_medicine_order": "create_order",
+                    "list_current_medications": "get_order_history",
+                    "get_medicine_details": "get_medicine_details",
                 }[tool_name]
                 creds = self.user_mcp_credentials.get("pharmacy_api")
                 # pharmacy_api is self-hosted against our own DB (no per-user
-                # credential) — the write tool needs our internal user_id to
-                # scope the order, which the LLM never supplies itself.
+                # credential) — the tools that touch this user's own records
+                # need our internal user_id to scope them, which the LLM never
+                # supplies itself.
                 call_args = tool_input
-                if tool_name == "create_medicine_order":
+                if tool_name in ("create_medicine_order", "list_current_medications"):
                     call_args = {**tool_input, "user_id": state["user_id"]}
                 result = await call_mcp_tool("pharmacy_api", mcp_tool, call_args, creds)
 

@@ -7,6 +7,7 @@ Handles all career document actions:
   - apply_to_job           → Job Board MCP + Email MCP
   - optimize_resume        → Pure Claude reasoning
   - generate_interview_prep → Pure Claude reasoning
+  - schedule_interview     → Google Calendar MCP
 """
 
 import structlog
@@ -107,6 +108,40 @@ _TOOLS: dict[str, list[dict]] = {
     "match_resume": [],
     "optimize_resume": [],
     "generate_interview_prep": [],
+
+    "schedule_interview": [
+        {
+            "name": "check_interview_availability",
+            "description": (
+                "Check the user's Google Calendar for available slots in the "
+                "next 14 days, to suggest a time if none was given."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "preferred_date": {"type": "string", "description": "ISO 8601 date, if the user gave one. Leave null otherwise."},
+                    "duration_minutes": {"type": "integer", "default": 60},
+                },
+                "required": [],
+            },
+        },
+        {
+            "name": "create_interview_event",
+            "description": "Create the interview on the user's Google Calendar.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "job_title": {"type": "string"},
+                    "company_name": {"type": "string"},
+                    "start_datetime": {"type": "string", "description": "ISO 8601 datetime"},
+                    "end_datetime": {"type": "string", "description": "ISO 8601 datetime"},
+                    "location": {"type": "string", "description": "Video call link or physical address, if known"},
+                    "notes": {"type": "string", "description": "Interviewer name, round, or other context"},
+                },
+                "required": ["job_title", "company_name", "start_datetime", "end_datetime"],
+            },
+        },
+    ],
 }
 
 
@@ -150,6 +185,14 @@ class CareerAgent(BaseAgent):
             "{question, situation, task, action, result} built from the candidate's actual "
             "experience — do not invent experience they don't have), 'technical_topics_to_review' "
             "(list), 'key_talking_points' (list)."
+        ),
+        "schedule_interview": (
+            "The user's instructions should specify the company, role, and — ideally — a date/time "
+            "for the interview. If a date/time was given, use it directly. If not, check calendar "
+            "availability and pick the earliest reasonable weekday slot, clearly noting in the "
+            "result that it's a placeholder the user should confirm. Create the calendar event. "
+            "Return JSON with: 'job_title', 'company_name', 'scheduled_start', 'scheduled_end', "
+            "'was_time_specified_by_user' (boolean)."
         ),
     }
 
@@ -205,6 +248,22 @@ class CareerAgent(BaseAgent):
             data_used = {"skills": skills, "target_role": (state.get("user_context") or "")[:200]}
             risk = "low"
 
+        elif action_type == "schedule_interview":
+            details = (state.get("user_context") or "").strip()
+            if not details:
+                raise ValueError(
+                    "schedule_interview needs the company and role at minimum — add "
+                    "a date/time too if you already have one, e.g. 'Interview with "
+                    "Beacon Labs for Frontend Engineer, Sept 5 2pm, 45 min video call.'"
+                )
+            steps = [
+                ActionPlanStep(step_number=1, description="Check calendar availability", requires_external_call=True, is_reversible=True, tool_name="check_interview_availability"),
+                ActionPlanStep(step_number=2, description="Create the interview event", requires_external_call=True, is_reversible=True, tool_name="create_interview_event"),
+            ]
+            external = ["google_calendar"]
+            data_used = {"candidate": name, "instructions": details[:300]}
+            risk = "low"
+
         else:
             steps = [
                 ActionPlanStep(step_number=1, description=f"Analyse resume and produce {action_type.replace('_', ' ')}", requires_external_call=False, is_reversible=True, tool_name=None),
@@ -225,9 +284,27 @@ class CareerAgent(BaseAgent):
     async def _execute_tool(self, tool_name: str, tool_input: dict, state: AgentState) -> ToolResult:
         job_board_tools = {"search_jobs", "match_resume_to_job", "get_job_details", "submit_job_application"}
         email_tools = {"send_application_confirmation_email"}
+        calendar_tools = {"check_interview_availability", "create_interview_event"}
 
         try:
-            if tool_name in job_board_tools:
+            if tool_name in calendar_tools:
+                creds = self.user_mcp_credentials.get("google_calendar")
+                if tool_name == "check_interview_availability":
+                    result = await call_mcp_tool("google_calendar", "find_free_slots", tool_input, creds)
+                else:
+                    company = tool_input.get("company_name", "the interview")
+                    job_title = tool_input.get("job_title", "")
+                    mcp_input = {
+                        "title": f"Interview: {job_title} at {company}".strip(),
+                        "start_datetime": tool_input.get("start_datetime"),
+                        "end_datetime": tool_input.get("end_datetime"),
+                        "location": tool_input.get("location", ""),
+                        "description": tool_input.get("notes", ""),
+                        "reminders": [{"minutes_before": 1440}, {"minutes_before": 60}],  # 1d + 1h
+                    }
+                    result = await call_mcp_tool("google_calendar", "create_event", mcp_input, creds)
+
+            elif tool_name in job_board_tools:
                 mcp_map = {
                     "search_jobs": "search_jobs",
                     "match_resume_to_job": "match_resume_to_job",
@@ -235,7 +312,14 @@ class CareerAgent(BaseAgent):
                     "submit_job_application": "submit_application",
                 }
                 creds = self.user_mcp_credentials.get("job_board_api")
-                result = await call_mcp_tool("job_board_api", mcp_map[tool_name], tool_input, creds)
+                # job_board_api is self-hosted against our own DB (no
+                # per-user credential) — the write tool needs our internal
+                # user_id to scope the application, which the LLM never
+                # supplies itself.
+                call_args = tool_input
+                if tool_name == "submit_job_application":
+                    call_args = {**tool_input, "user_id": state["user_id"]}
+                result = await call_mcp_tool("job_board_api", mcp_map[tool_name], call_args, creds)
 
             elif tool_name in email_tools:
                 creds = self.user_mcp_credentials.get("email_api")

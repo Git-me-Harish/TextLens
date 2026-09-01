@@ -229,7 +229,13 @@ class HealthcareAgent(BaseAgent):
                     "create_medicine_order": "create_order",
                 }[tool_name]
                 creds = self.user_mcp_credentials.get("pharmacy_api")
-                result = await call_mcp_tool("pharmacy_api", mcp_tool, tool_input, creds)
+                # pharmacy_api is self-hosted against our own DB (no per-user
+                # credential) — the write tool needs our internal user_id to
+                # scope the order, which the LLM never supplies itself.
+                call_args = tool_input
+                if tool_name == "create_medicine_order":
+                    call_args = {**tool_input, "user_id": state["user_id"]}
+                result = await call_mcp_tool("pharmacy_api", mcp_tool, call_args, creds)
 
             else:
                 return ToolResult(tool_name=tool_name, success=False, data=None, error=f"Unknown tool: {tool_name}")

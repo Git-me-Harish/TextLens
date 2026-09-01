@@ -199,7 +199,14 @@ class FinanceAgent(BaseAgent):
                     "create_expense": "create_expense",
                 }
                 creds = self.user_mcp_credentials.get("accounting_api")
-                result = await call_mcp_tool("accounting_api", mcp_map[tool_name], tool_input, creds)
+                # accounting_api is self-hosted against our own DB (no
+                # per-user credential) — the write tool needs our internal
+                # user_id to scope the ledger entry, which the LLM never
+                # supplies itself.
+                call_args = tool_input
+                if tool_name == "create_expense":
+                    call_args = {**tool_input, "user_id": state["user_id"]}
+                result = await call_mcp_tool("accounting_api", mcp_map[tool_name], call_args, creds)
 
             elif tool_name in email_tools:
                 creds = self.user_mcp_credentials.get("email_api")

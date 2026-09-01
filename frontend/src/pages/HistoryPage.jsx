@@ -1,11 +1,25 @@
 import { useState, useEffect, useCallback, Fragment } from "react";
-import { Trash2, Download, ChevronLeft, ChevronRight, RotateCcw, AlertCircle } from "lucide-react";
+import { Trash2, Download, ChevronLeft, ChevronRight, RotateCcw, AlertCircle, FileText } from "lucide-react";
 import toast from "react-hot-toast";
 import { formatDistanceToNow } from "date-fns";
 import api, { errMsg } from "../lib/api";
 import { Badge, Spinner } from "../components/ui";
 
 const STATUS_BADGE = { completed: "success", failed: "danger", processing: "processing", pending: "warning" };
+
+// Cover pages / section headers are often typeset with wide letter-spacing
+// in the source PDF ("S Y S T E M  D E S I G N") — the extraction is
+// faithfully reproducing that, but as a raw one-line preview it just reads
+// as noise. Collapse runs of 3+ single characters separated by spaces back
+// into words, and normalize all other whitespace/newlines into a single
+// flowing paragraph.
+function cleanPreview(text) {
+  if (!text) return "";
+  return text
+    .replace(/\b(?:[A-Za-z0-9]\s){2,}[A-Za-z0-9]\b/g, (run) => run.replace(/\s+/g, ""))
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 function ExpandedRow({ job, onRetry, colSpan }) {
   if (job.status === "failed") {
@@ -31,11 +45,33 @@ function ExpandedRow({ job, onRetry, colSpan }) {
     );
   }
   if (job.status === "completed" && job.result_text) {
+    const preview = cleanPreview(job.result_text).slice(0, 420);
+    const truncated = cleanPreview(job.result_text).length > 420;
     return (
       <tr>
-        <td colSpan={colSpan} style={{ padding: "0.75rem 1rem 1rem", background: "var(--paper)" }}>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: "0.76rem", color: "var(--ink-secondary)", lineHeight: 1.6, maxHeight: 120, overflow: "hidden" }}>
-            {job.result_text.slice(0, 400)}{job.result_text.length > 400 ? "..." : ""}
+        <td colSpan={colSpan} style={{ padding: "0 1rem 1rem" }}>
+          <div style={{
+            position: "relative", background: "#fff", border: "1px solid var(--border)",
+            borderRadius: "var(--radius)", padding: "0.75rem 0.9rem",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+              <FileText size={12} style={{ color: "var(--ink-muted)" }} />
+              <span style={{ fontSize: "0.68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-muted)" }}>
+                Extracted preview
+              </span>
+            </div>
+            <div style={{
+              fontFamily: "var(--font-body)", fontSize: "0.83rem", color: "var(--ink-secondary)",
+              lineHeight: 1.65, maxHeight: 90, overflow: "hidden", position: "relative",
+            }}>
+              {preview}{truncated && "…"}
+              {truncated && (
+                <div style={{
+                  position: "absolute", bottom: 0, left: 0, right: 0, height: 28,
+                  background: "linear-gradient(transparent, #fff)",
+                }} />
+              )}
+            </div>
           </div>
         </td>
       </tr>

@@ -98,18 +98,21 @@ class Settings(BaseSettings):
     )
     ACTION_CELERY_QUEUE: str = Field(default="actions")
     ACTION_TASK_TIME_LIMIT: int = Field(default=330)
-    # These two are actually self-hosted on this same backend (see
-    # app/api/routes/mcp_google_calendar.py, mcp_email.py) — the default
-    # must point at the local route, not a placeholder, since a deploy that
-    # doesn't explicitly set these env vars would otherwise silently try to
-    # reach a domain that doesn't exist.
+    # All five are self-hosted on this same backend (see
+    # app/api/routes/mcp_google_calendar.py, mcp_email.py, mcp_pharmacy.py,
+    # mcp_job_board.py, mcp_accounting.py) — the default must point at the
+    # local route, not a placeholder, since a deploy that doesn't explicitly
+    # set these env vars would otherwise silently try to reach a domain
+    # that doesn't exist. Only google_calendar is a genuine third-party
+    # integration (per-user Google OAuth); the rest are real, working
+    # implementations backed by this app's own database, standing in for
+    # partner accounts this project doesn't have — see each proxy's
+    # module docstring for why, and what it'd take to swap in a real one.
     GOOGLE_CALENDAR_MCP_URL: str = "http://localhost:8000/mcp/google-calendar"
     EMAIL_MCP_URL: str = "http://localhost:8000/mcp/email"
-    # No self-hosted implementation exists for these — a real placeholder,
-    # meant to be replaced once you have an actual deployed server.
-    PHARMACY_MCP_URL: str = "https://pharmacy-mcp.your-domain.com"
-    JOB_BOARD_MCP_URL: str = "https://jobs-mcp.your-domain.com"
-    ACCOUNTING_MCP_URL: str = "https://accounting-mcp.your-domain.com"
+    PHARMACY_MCP_URL: str = "http://localhost:8000/mcp/pharmacy"
+    JOB_BOARD_MCP_URL: str = "http://localhost:8000/mcp/job-board"
+    ACCOUNTING_MCP_URL: str = "http://localhost:8000/mcp/accounting"
 
     # Voyage AI embeddings (free tier: 200M tokens/month) -> voyage-3     → 1024 dims, best general quality (default)
     VOYAGE_API_KEY:   str = ""

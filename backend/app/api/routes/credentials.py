@@ -28,6 +28,7 @@ from app.services.mcp.credential_store import (
     save_credential,
 )
 from app.services.mcp.registry import MCP_REGISTRY
+from app.services.mcp.token_refresh import compute_expires_at
 
 logger = structlog.get_logger(__name__)
 
@@ -232,7 +233,12 @@ async def google_calendar_callback(
         # it — we set that above, so this should be rare, but don't silently drop it.
         logger.warning("google_calendar.no_refresh_token", user_id=user_id)
 
-    credentials = {"access_token": access_token}
+    # Store when this token dies so credential_store can refresh it before use
+    # rather than discovering expiry as a 401 mid-action — see token_refresh.py.
+    credentials = {
+        "access_token": access_token,
+        "expires_at": compute_expires_at(token_data.get("expires_in")),
+    }
     if refresh_token:
         credentials["refresh_token"] = refresh_token
 

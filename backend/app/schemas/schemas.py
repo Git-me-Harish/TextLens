@@ -2,10 +2,24 @@
 Pydantic schemas for TextLens API.
 Phase 2 additions: BatchJob, APIKey, Webhook, FieldCorrection, AuditLog.
 """
-from pydantic import BaseModel, EmailStr, field_validator, HttpUrl
+import re
+from pydantic import BaseModel, EmailStr, Field, field_validator, HttpUrl
 from typing import Optional, Any, List
 from datetime import datetime
 from app.models.models import UserRole, JobType, JobStatus, AgentStatus, AgentDomain, BatchStatus
+
+
+# action_schemas.py's stated policy for user-supplied free text is
+# length-bounded + HTML-stripped + no injection vectors. user_instructions
+# (AgentRunRequest, BatchJobCreate below) is the same kind of field — a
+# small local copy rather than importing action_schemas.py's private
+# `_strip_html`, since that module is scoped to the agentic action layer and
+# this one to core OCR/agent CRUD; they're kept independent on purpose.
+def _strip_html(value: str) -> str:
+    return re.sub(r"<[^>]+>", "", value).strip()
+
+
+_INSTRUCTIONS_MAX_LEN = 2000
 
 
 # Auth
@@ -108,7 +122,19 @@ class AgentRunRequest(BaseModel):
     job_id: str
     domain: str
     pipeline_type: str
-    user_instructions: Optional[str] = ""
+    # Genuinely shapes the model's output — appended to the prompt as
+    # "Additional instructions from the user" (agent_service.py::run_agent).
+    # Previously unbounded and unsanitized, unlike every other free-text
+    # field in this app; capped and HTML-stripped for the same reasons
+    # action_schemas.py documents for user_context.
+    user_instructions: Optional[str] = Field(default="", max_length=_INSTRUCTIONS_MAX_LEN)
+
+    @field_validator("user_instructions")
+    @classmethod
+    def sanitize_user_instructions(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        return _strip_html(v)[:_INSTRUCTIONS_MAX_LEN]
 
 
 class AgentRunOut(BaseModel):
@@ -122,6 +148,7 @@ class AgentRunOut(BaseModel):
     error_message: Optional[str]
     processing_time_ms: Optional[int]
     original_filename: Optional[str]
+    user_instructions: Optional[str] = None
     created_at: datetime
     completed_at: Optional[datetime]
 

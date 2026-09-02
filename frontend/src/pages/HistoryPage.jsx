@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, Fragment } from "react";
 import { Trash2, Download, ChevronLeft, ChevronRight, RotateCcw, AlertCircle, FileText } from "lucide-react";
 import toast from "react-hot-toast";
+import { useConfirm } from "../lib/useConfirm";
 import { formatDistanceToNow } from "date-fns";
 import api, { errMsg } from "../lib/api";
 import { Badge, Spinner } from "../components/ui";
@@ -81,6 +82,7 @@ function ExpandedRow({ job, onRetry, colSpan }) {
 }
 
 export default function HistoryPage() {
+  const { confirm, confirmDialog } = useConfirm();
   const [jobs, setJobs] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -99,10 +101,17 @@ export default function HistoryPage() {
 
   useEffect(() => { load(page); }, [page]);
 
-  const deleteJob = async (id) => {
+  const deleteJob = async (id, filename) => {
+    // Recoverable: this now moves the extraction to Trash rather than
+    // destroying it and its files outright.
+    if (!await confirm({
+      title: "Move to Trash?",
+      message: `"${filename || "This extraction"}" will move to Trash. You can restore it for 30 days.`,
+      confirmLabel: "Move to Trash",
+    })) return;
     try {
       await api.delete(`/jobs/${id}`);
-      toast.success("Deleted");
+      toast.success("Moved to Trash");
       load(page);
     } catch { toast.error("Delete failed"); }
   };
@@ -174,7 +183,7 @@ export default function HistoryPage() {
                             <Download size={14} />
                           </button>
                         )}
-                        <button onClick={() => deleteJob(job.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-muted)", padding: 4 }}>
+                        <button onClick={() => deleteJob(job.id, job.original_filename)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-muted)", padding: 4 }}>
                           <Trash2 size={14} />
                         </button>
                       </div>
@@ -202,6 +211,7 @@ export default function HistoryPage() {
           <button className="page-btn" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}><ChevronRight size={14} /></button>
         </div>
       )}
+      {confirmDialog}
     </div>
   );
 }

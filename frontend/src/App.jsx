@@ -29,6 +29,7 @@ import UniversalExtractorPage from "./pages/UniversalExtractorPage";
 import DocumentStudioPage     from "./pages/DocumentStudioPage";
 import PDFChatPage            from "./pages/PDFChatPage";
 import ChatHistoryPage        from "./pages/ChatHistoryPage";
+import TrashPage             from "./pages/TrashPage";
 
 // Legacy shim redirects
 import {
@@ -83,6 +84,7 @@ export default function App() {
               <Route path="/tools/summarize" element={<Navigate to="/tools/studio" replace />} />
               <Route path="/tools/pdf-chat"  element={<PL><PDFChatPage /></PL>} />
               <Route path="/chat-history"    element={<PL><ChatHistoryPage /></PL>} />
+              <Route path="/trash"           element={<PL><TrashPage /></PL>} />
 
               <Route path="/tools/ocr-image"   element={<ImageOCRPage />} />
               <Route path="/tools/pdf-extract" element={<PDFExtractPage />} />

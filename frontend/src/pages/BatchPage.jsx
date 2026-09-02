@@ -30,9 +30,11 @@ import {
   FileText, AlertTriangle,
 } from "lucide-react";
 import toast from "react-hot-toast";
+import { useConfirm } from "../lib/useConfirm";
 import api, { errMsg } from "../lib/api";
-import { Button, Spinner, Badge } from "../components/ui";
+import { Button, Spinner, Badge, Select } from "../components/ui";
 import { formatDistanceToNow } from "date-fns";
+import { INSTRUCTIONS_MAX_LEN, INSTRUCTIONS_HELP_TEXT, instructionsPlaceholder } from "../lib/instructionsHelp";
 
 /*  constants  */
 
@@ -169,6 +171,16 @@ function BatchCard({ batch, onDelete, onDownload }) {
         </div>
       )}
 
+      {/* Instructions used — ties every item's result back to what was asked
+          for, the same gap closed on the Pipelines page. Shown once here
+          rather than per item since one instruction applies to the whole batch. */}
+      {expanded && batch.user_instructions && (
+        <div style={{ padding: "0.75rem 1.25rem", borderBottom: "1px solid var(--border)", fontSize: "0.8rem", color: "var(--ink-muted)", background: "var(--paper)" }}>
+          <span style={{ fontWeight: 600, color: "var(--ink-secondary)" }}>Instructions given: </span>
+          "{batch.user_instructions}"
+        </div>
+      )}
+
       {/* Expanded per-item list */}
       {expanded && batch.items && batch.items.length > 0 && (
         <div style={{ maxHeight: 320, overflowY: "auto" }}>
@@ -230,6 +242,7 @@ function BatchCard({ batch, onDelete, onDownload }) {
 /*  page  */
 
 export default function BatchPage() {
+  const { confirm, confirmDialog } = useConfirm();
   const queryClient = useQueryClient();
 
   // Catalog (static — no interval needed) 
@@ -309,7 +322,11 @@ export default function BatchPage() {
 
   // Delete batch 
   const handleDelete = async (id) => {
-    if (!confirm("Delete this batch job?")) return;
+    if (!await confirm({
+      title: "Move to Trash?",
+      message: "This batch will move to Trash. You can restore it for 30 days.",
+      confirmLabel: "Move to Trash",
+    })) return;
     try {
       await api.delete(`/batch/${id}`);
       // Optimistic: remove from cache immediately, server confirms on next refetch
@@ -414,47 +431,50 @@ export default function BatchPage() {
             <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, marginBottom: 6, color: "var(--ink-muted)" }}>
               Domain *
             </label>
-            <select
-              className="form-input"
+            <Select
+              style={{ width: "100%", display: "block" }}
+              placeholder="Select domain…"
+              aria-label="Domain"
               value={domain}
               onChange={(e) => { setDomain(e.target.value); setPipeline(""); }}
-            >
-              <option value="">Select domain...</option>
-              {catalog && Object.entries(catalog).map(([k, v]) => (
-                <option key={k} value={k}>{v.label}</option>
-              ))}
-            </select>
+              options={catalog ? Object.entries(catalog).map(([k, v]) => ({ value: k, label: v.label })) : []}
+            />
           </div>
 
           <div>
             <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, marginBottom: 6, color: "var(--ink-muted)" }}>
               Pipeline *
             </label>
-            <select
-              className="form-input"
+            <Select
+              style={{ width: "100%", display: "block" }}
+              placeholder={domain ? "Select pipeline…" : "Choose a domain first"}
+              aria-label="Pipeline"
               value={pipeline}
               onChange={(e) => setPipeline(e.target.value)}
               disabled={!domain}
-            >
-              <option value="">Select pipeline...</option>
-              {pipelines.map(([k, p]) => (
-                <option key={k} value={k}>{p.label}</option>
-              ))}
-            </select>
+              options={pipelines.map(([k, pl]) => ({ value: k, label: pl.label }))}
+            />
           </div>
         </div>
 
         <div style={{ marginBottom: "1rem" }}>
-          <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, marginBottom: 6, color: "var(--ink-muted)" }}>
+          <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, marginBottom: 4, color: "var(--ink-muted)" }}>
             Instructions <span style={{ fontWeight: 400 }}>(optional)</span>
           </label>
+          <p style={{ fontSize: "0.76rem", color: "var(--ink-muted)", marginBottom: 6, lineHeight: 1.5 }}>
+            {INSTRUCTIONS_HELP_TEXT} Applied to every file in this batch.
+          </p>
           <textarea
             className="form-input"
-            placeholder="Any specific extraction focus, context, or formatting instructions..."
+            placeholder={instructionsPlaceholder(domain)}
             value={instructions}
-            onChange={(e) => setInstructions(e.target.value)}
+            onChange={(e) => setInstructions(e.target.value.slice(0, INSTRUCTIONS_MAX_LEN))}
+            maxLength={INSTRUCTIONS_MAX_LEN}
             rows={2}
           />
+          <div style={{ textAlign: "right", fontSize: "0.7rem", color: instructions.length > INSTRUCTIONS_MAX_LEN - 100 ? "var(--warning)" : "var(--ink-muted)", marginTop: 3 }}>
+            {instructions.length}/{INSTRUCTIONS_MAX_LEN}
+          </div>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -496,6 +516,7 @@ export default function BatchPage() {
           ))
         )}
       </div>
+      {confirmDialog}
     </div>
   );
 }

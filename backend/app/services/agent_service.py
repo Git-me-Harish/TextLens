@@ -634,7 +634,17 @@ async def run_agent(
 
     user_msg = f"Document text:\n\n{extracted_text[:12000]}"
     if user_instructions:
-        user_msg += f"\n\nAdditional instructions from user: {user_instructions}"
+        # Explicit that this guides focus/emphasis rather than replacing the
+        # schema — the system prompt above is a strict "return ONLY this JSON
+        # shape" contract, and a free-text instruction like "just give me a
+        # short summary" could otherwise read as license to drop required
+        # fields. Framing it as guidance keeps both promises: the user's
+        # instructions are actually applied, and the output stays parseable.
+        user_msg += (
+            "\n\nAdditional instructions from the user — apply these to guide "
+            "what you focus on and emphasize, but keep the exact JSON schema "
+            f"and field names defined above unchanged:\n{user_instructions}"
+        )
 
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:

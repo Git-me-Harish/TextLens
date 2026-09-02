@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import toast from "react-hot-toast";
+import { useConfirm } from "../lib/useConfirm";
 import api, { errMsg } from "../lib/api";
 import { Spinner } from "../components/ui";
 
@@ -179,6 +180,7 @@ function DocumentGroup({ group, onDelete, onResume }) {
 
 /*  Main page  */
 export default function ChatHistoryPage() {
+  const { confirm, confirmDialog } = useConfirm();
   const navigate      = useNavigate();
   const queryClient   = useQueryClient();
   const [search, setSearch] = useState("");
@@ -199,7 +201,11 @@ export default function ChatHistoryPage() {
   const grouped = useMemo(() => groupByDocument(filtered), [filtered]);
 
   const handleDelete = async (sessionId) => {
-    if (!confirm("Delete this chat session? This cannot be undone.")) return;
+    if (!await confirm({
+      title: "Move to Trash?",
+      message: "This chat session will move to Trash. You can restore it for 30 days.",
+      confirmLabel: "Move to Trash",
+    })) return;
     try {
       await api.delete(`/chat/sessions/${sessionId}`);
       // Optimistic remove from cache
@@ -307,6 +313,7 @@ export default function ChatHistoryPage() {
           onResume={handleResume}
         />
       ))}
+      {confirmDialog}
     </div>
   );
 }

@@ -10,6 +10,7 @@ DELETE /api/batch/{id}   — cancel/delete
 import asyncio
 import logging
 import os
+import re
 import uuid
 import zipfile
 from datetime import datetime
@@ -19,7 +20,9 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Q
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
+from app.services import trash_service
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.database import get_db
@@ -89,7 +92,10 @@ async def create_batch_job(
     name: str = Form(default="Batch Job"),
     domain: str = Form(...),
     pipeline_type: str = Form(...),
-    user_instructions: str = Form(default=""),
+    # multipart/form-data bypasses BatchJobCreate entirely — Form() fields
+    # are validated by FastAPI directly, so the length cap has to live here,
+    # not on that (otherwise unused-for-this-route) schema.
+    user_instructions: str = Form(default="", max_length=2000),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -137,7 +143,7 @@ async def create_batch_job(
         pipeline_type=pipeline_type,
         status=BatchStatus.pending,
         total_files=len(saved_files),
-        user_instructions=user_instructions or None,
+        user_instructions=(re.sub(r"<[^>]+>", "", user_instructions).strip() or None),
     )
     db.add(batch)
     await db.flush()
@@ -154,7 +160,16 @@ async def create_batch_job(
         db.add(item)
 
     await db.commit()
-    await db.refresh(batch)
+
+    # A plain db.refresh(batch) expires the object but does not eager-load
+    # relationships — the very next access of `.items` (during Pydantic's
+    # serialization of the BatchJobOut response, after this async handler has
+    # already returned control) triggers a lazy load and asyncpg raises
+    # MissingGreenlet. Re-selecting with selectinload avoids that, matching
+    # the two GET endpoints below which need the same fix for the same reason.
+    batch = (await db.execute(
+        select(BatchJob).options(selectinload(BatchJob.items)).where(BatchJob.id == batch.id)
+    )).scalar_one()
 
     # Fire background processing
     background_tasks.add_task(run_batch_job, batch.id, user.id)
@@ -171,8 +186,17 @@ async def list_batch_jobs(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    q = select(BatchJob).where(BatchJob.user_id == user.id)
-    cq = select(func.count(BatchJob.id)).where(BatchJob.user_id == user.id)
+    # BatchJobOut.items serializes BatchJob.items, a lazy relationship. Without
+    # eager-loading it here, Pydantic accesses it outside the async context
+    # during response serialization and asyncpg raises MissingGreenlet —
+    # every list call 500s the instant a user has any batch with items,
+    # reproduced live testing the batch-instructions display below.
+    q = select(BatchJob).options(selectinload(BatchJob.items)).where(
+        BatchJob.user_id == user.id, BatchJob.deleted_at.is_(None)
+    )
+    cq = select(func.count(BatchJob.id)).where(
+        BatchJob.user_id == user.id, BatchJob.deleted_at.is_(None)
+    )
 
     if status:
         q = q.where(BatchJob.status == status)
@@ -196,8 +220,13 @@ async def get_batch_job(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # Same eager-load requirement as list_batch_jobs above.
     result = await db.execute(
-        select(BatchJob).where(BatchJob.id == batch_id, BatchJob.user_id == user.id)
+        select(BatchJob).options(selectinload(BatchJob.items)).where(
+            BatchJob.id == batch_id,
+            BatchJob.user_id == user.id,
+            BatchJob.deleted_at.is_(None),   # trashed reads as gone
+        )
     )
     batch = result.scalar_one_or_none()
     if not batch:
@@ -216,7 +245,11 @@ async def download_batch_results(
     One sheet per processed file + a Summary sheet with aggregate stats.
     """
     result = await db.execute(
-        select(BatchJob).where(BatchJob.id == batch_id, BatchJob.user_id == user.id)
+        select(BatchJob).where(
+            BatchJob.id == batch_id,
+            BatchJob.user_id == user.id,
+            BatchJob.deleted_at.is_(None),   # trashed reads as gone
+        )
     )
     batch = result.scalar_one_or_none()
     if not batch:
@@ -322,7 +355,11 @@ async def delete_batch_job(
     user: User = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(BatchJob).where(BatchJob.id == batch_id, BatchJob.user_id == user.id)
+        select(BatchJob).where(
+            BatchJob.id == batch_id,
+            BatchJob.user_id == user.id,
+            BatchJob.deleted_at.is_(None),   # trashed reads as gone
+        )
     )
     batch = result.scalar_one_or_none()
     if not batch:
@@ -334,5 +371,5 @@ async def delete_batch_job(
             detail="Cannot delete a batch that is currently processing. Wait for completion."
         )
 
-    await db.delete(batch)
-    await db.commit()
+    # Soft delete — recoverable from Trash for 30 days (trash_service.py).
+    await trash_service.soft_delete(db, "batch", batch_id, user.id)

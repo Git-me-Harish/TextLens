@@ -30,6 +30,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
+from app.services import trash_service
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.database import get_db
@@ -109,7 +110,12 @@ def _validate_job_type(job_type: str) -> None:
 async def _owned_job_or_404(db: AsyncSession, job_id: str, user_id: str) -> OCRJob:
     """Fetch an OCRJob that belongs to the authenticated user or raise 404."""
     row = (await db.execute(
-        select(OCRJob).where(OCRJob.id == job_id, OCRJob.user_id == user_id)
+        select(OCRJob).where(
+            OCRJob.id == job_id,
+            OCRJob.user_id == user_id,
+            # A trashed job reads as gone everywhere except the Trash API.
+            OCRJob.deleted_at.is_(None),
+        )
     )).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -173,7 +179,13 @@ async def upload_file(
     # Duplicate detection — same bytes already processed by this user
     existing = (await db.execute(
         select(OCRJob)
-        .where(OCRJob.user_id == user.id, OCRJob.file_hash == file_hash)
+        # Trashed uploads must not block a re-upload: the user deleted it,
+        # so the same file coming back is a new job, not a duplicate.
+        .where(
+            OCRJob.user_id == user.id,
+            OCRJob.file_hash == file_hash,
+            OCRJob.deleted_at.is_(None),
+        )
         .order_by(OCRJob.created_at.desc())
     )).scalars().first()
     if existing:
@@ -294,12 +306,14 @@ async def list_jobs(
     offset = (page - 1) * per_page
 
     total = (await db.execute(
-        select(func.count(OCRJob.id)).where(OCRJob.user_id == user.id)
+        select(func.count(OCRJob.id)).where(
+            OCRJob.user_id == user.id, OCRJob.deleted_at.is_(None)
+        )
     )).scalar()
 
     jobs = (await db.execute(
         select(OCRJob)
-        .where(OCRJob.user_id == user.id)
+        .where(OCRJob.user_id == user.id, OCRJob.deleted_at.is_(None))
         .order_by(OCRJob.created_at.desc())
         .offset(offset)
         .limit(per_page)
@@ -353,42 +367,18 @@ async def delete_job(
     user: User = Depends(get_current_user),
 ):
     """
-    Delete the job record.
+    Move the job to Trash (soft delete).
 
-    File cleanup logic:
-      - Source file (file_path): deleted only if no other job shares the same
-        object key (because /reuse jobs share the original upload).
-      - Result file (result_file_path): always deleted if present — result
-        files are unique per job, never shared.
+    Deliberately does NOT touch object storage. This used to delete the source
+    and result objects from MinIO immediately, which made the deletion
+    unrecoverable in principle, not just in practice — restoring a row whose
+    files are gone gives back a broken record. Object cleanup now happens only
+    when the item is purged: on "delete permanently", on "empty Trash", or by
+    the nightly sweep after the retention window. See services/trash_service.py.
     """
-    job = await _owned_job_or_404(db, job_id, user.id)
-
-    keys_to_delete: list[str] = []
-
-    # Result file is always unique — safe to delete
-    if job.result_file_path:
-        keys_to_delete.append(job.result_file_path)
-
-    # Source file may be shared across /reuse jobs — only delete when last ref
-    if job.file_path:
-        shared_count = (await db.execute(
-            select(func.count(OCRJob.id)).where(
-                OCRJob.file_path == job.file_path,
-                OCRJob.id != job.id,
-            )
-        )).scalar() or 0
-
-        if shared_count == 0:
-            keys_to_delete.append(job.file_path)
-
-    await db.delete(job)
-    await db.flush()
-
-    # Delete from MinIO after the DB row is gone to avoid orphaned records
-    if keys_to_delete:
-        await storage_service.delete_objects(keys_to_delete)
-
-    logger.info("job.deleted", job_id=job_id[:8], objects_removed=len(keys_to_delete))
+    await _owned_job_or_404(db, job_id, user.id)
+    await trash_service.soft_delete(db, "job", job_id, user.id)
+    logger.info("job.trashed", job_id=job_id[:8])
 
 
 @router.post("/{job_id}/retry", response_model=JobOut)

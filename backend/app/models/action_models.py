@@ -104,6 +104,10 @@ class ActionRun(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, nullable=False
     )
+    # NULL = live, set = in Trash. See migration 021 — DELETE marks this
+    # instead of removing the row, and object storage is left intact until
+    # the purge, so a restore gets a row whose files still exist.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

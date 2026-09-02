@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import trash_service
 from app.api.deps import get_current_user
 from app.core.limiter import limiter
 from app.db.database import get_db
@@ -105,7 +106,11 @@ class ChattableDocumentOut(BaseModel):
 
 async def _get_owned_session(db: AsyncSession, session_id: str, user_id: str) -> ChatSession:
     res = await db.execute(
-        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.user_id == user_id,
+            ChatSession.deleted_at.is_(None),   # trashed reads as gone
+        )
     )
     session = res.scalar_one_or_none()
     if not session:
@@ -276,7 +281,13 @@ async def list_sessions(
     res = await db.execute(
         select(ChatSession, OCRJob.original_filename)
         .join(OCRJob, ChatSession.job_id == OCRJob.id)
-        .where(ChatSession.user_id == user.id)
+        .where(
+            ChatSession.user_id == user.id,
+            ChatSession.deleted_at.is_(None),
+            # A session whose document was trashed has nothing to chat about,
+            # so hide it too rather than listing a link that 404s on open.
+            OCRJob.deleted_at.is_(None),
+        )
         .order_by(ChatSession.updated_at.desc())
         .limit(per_page)
         .offset((page - 1) * per_page)
@@ -330,6 +341,6 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    session = await _get_owned_session(db, session_id, user.id)
-    await db.delete(session)
-    await db.commit()
+    await _get_owned_session(db, session_id, user.id)
+    # Soft delete — recoverable from Trash for 30 days (trash_service.py).
+    await trash_service.soft_delete(db, "chat_session", session_id, user.id)

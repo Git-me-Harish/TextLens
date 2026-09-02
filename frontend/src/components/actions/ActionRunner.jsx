@@ -16,6 +16,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Check, X } from "lucide-react";
+import api from "../../lib/api";
 import ApprovalModal from "./ApprovalModal";
 import { STATUS_ICONS } from "../../lib/actionIcons";
 
@@ -46,6 +47,52 @@ export default function ActionRunner({ actionRunId, actionLabel, onComplete, onC
       { id: Date.now(), label, detail, ts: new Date().toLocaleTimeString() },
     ]);
   }, []);
+
+  // ── Recover current state on mount ─────────────────────────────────────────
+  // The SSE stream only carries events from the moment it connects; it never
+  // replays what already happened. So a reload — or a dropped connection —
+  // left this component sitting on "Starting…" while the run had long since
+  // moved on, and if the plan had become ready in the meantime the approval
+  // token (delivered exactly once, in plan_ready) was gone for good, leaving
+  // an action that could never be approved. Seeding from REST first makes the
+  // stream an optimisation rather than the only source of truth.
+  useEffect(() => {
+    if (!actionRunId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { data: run } = await api.get(`/actions/${actionRunId}`);
+        if (cancelled) return;
+
+        setStatus(run.status);
+        if (run.action_result) setResult(run.action_result);
+        if (run.error_message) setError(run.error_message);
+
+        if (run.status === "AWAITING_APPROVAL") {
+          // Only a hash of the token is stored server-side, so it can't be
+          // read back — ask for a fresh one, which invalidates the old.
+          const { data: reissued } = await api.post(
+            `/actions/${actionRunId}/approval-token`
+          );
+          if (cancelled) return;
+          setApproval({
+            plan: reissued.plan || run.plan,
+            token: reissued.approval_token,
+            expiresAt: reissued.approval_expires_at,
+          });
+          pushEvent("Restored — this plan is waiting for your approval");
+        } else if (run.status !== "PENDING") {
+          pushEvent(`Restored run state: ${run.status}`);
+        }
+      } catch {
+        // Non-fatal: the live stream below may still carry the run to
+        // completion. Never block the UI on the recovery attempt.
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [actionRunId, pushEvent]);
 
   // ── SSE subscription ───────────────────────────────────────────────────────
   useEffect(() => {

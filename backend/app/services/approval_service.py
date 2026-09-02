@@ -10,12 +10,13 @@ Responsibilities:
 
 Token design:
   - HS256 JWT signed with settings.SECRET_KEY
-  - Claims: sub=action_run_id, uid=user_id, exp=now+15min, iat=now
+  - Claims: sub=action_run_id, uid=user_id, exp=now+15min, iat=now, jti=nonce
   - Single-use enforced by immediately clearing the token on first successful verify
   - Stored (hashed) in action_runs.approval_token for DB-side invalidation
 """
 
 import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -53,6 +54,14 @@ def generate_approval_token(action_run_id: str, user_id: str) -> tuple[str, date
         "uid": user_id,
         "exp": expires_at,
         "iat": datetime.now(timezone.utc),
+        # Without a nonce the payload is fully determined by the run, the user
+        # and the current second — so two tokens issued for the same run inside
+        # one second are byte-identical, and re-issuing would NOT invalidate the
+        # previous token the way the stored-hash design intends. Reproduced
+        # directly when adding the approval-token re-issue endpoint. The jti
+        # makes every issue unique, so storing the new hash genuinely retires
+        # the old token.
+        "jti": secrets.token_urlsafe(16),
         "type": "action_approval",
     }
     token = jwt.encode(payload, settings.SECRET_KEY, algorithm=_ALGORITHM)

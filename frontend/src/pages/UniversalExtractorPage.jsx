@@ -9,7 +9,7 @@
  * Replaces polling with waitForJobSSE — resolves the instant Celery
  * publishes the job.completed event, no timer loops.
  */
-import { useState, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
 import { useNavigate } from "react-router-dom";
 import {
@@ -19,7 +19,8 @@ import {
 import toast from "react-hot-toast";
 import api, { errMsg } from "../lib/api";
 import { Spinner } from "../components/ui";
-import { waitForJobSSE } from "../hooks/useSSE";
+import { waitForJobSSE, isTerminalStatus } from "../hooks/useSSE";
+import { usePersistedState, useHydratedRecord } from "../lib/usePersistedState";
 
 /* File type resolution */
 
@@ -157,13 +158,49 @@ function ResultPanel({ job, text, format, onReset }) {
 
 /* Main page */
 export default function UniversalExtractorPage() {
-    const [format, setFormat] = useState("text");     // "text" | "markdown"
-    const [job, setJob] = useState(null);
+    // Persisted: the chosen format and the id of the extraction. The result
+    // text itself is NOT persisted — it can be megabytes and the server is its
+    // owner, so the id is stored and the body re-fetched (see below).
+    const [format, setFormat] = usePersistedState("extractor:format", "text");   // "text" | "markdown"
+    const [jobId, setJobId]   = usePersistedState("extractor:jobId", null);
     const [text, setText] = useState("");
     const [uploading, setUploading] = useState(false);
     const [statusMsg, setStatusMsg] = useState("");
 
-    const reset = () => { setJob(null); setText(""); setStatusMsg(""); };
+    const { data: job, setData: setJob } = useHydratedRecord(
+        jobId,
+        (id) => api.get(`/jobs/${id}`).then((r) => r.data),
+        { onMissing: () => setJobId(null) },   // deleted from history — drop it
+    );
+
+    // Rehydrating the job brings its text back after a reload.
+    useEffect(() => {
+        if (job?.result_text != null) setText(job.result_text);
+    }, [job?.id, job?.result_text]);
+
+    // An extraction still running when the page reloaded: resume the wait
+    // rather than leaving the user with a stale, silent page.
+    useEffect(() => {
+        if (!job || isTerminalStatus(job.status)) return;
+        let cancelled = false;
+        setUploading(true);
+        setStatusMsg("Extracting text…");
+        waitForJobSSE(job.id, api)
+            .then(async (done) => {
+                if (cancelled) return;
+                if (done.status === "completed") {
+                    const { data: full } = await api.get(`/jobs/${job.id}`);
+                    setJob(full);
+                    setText(full.result_text || "");
+                } else {
+                    toast.error(done.error_message || "Extraction failed");
+                }
+            })
+            .finally(() => { if (!cancelled) { setUploading(false); setStatusMsg(""); } });
+        return () => { cancelled = true; };
+    }, [job?.id, job?.status]);
+
+    const reset = () => { setJobId(null); setJob(null); setText(""); setStatusMsg(""); };
 
     const onDrop = useCallback(async ([file]) => {
         if (!file) return;
@@ -188,6 +225,7 @@ export default function UniversalExtractorPage() {
                 // Fetch full job to get result_text
                 const { data: fullJob } = await api.get(`/jobs/${done.id || submitted.id}`);
                 setJob(fullJob);
+                setJobId(fullJob.id);
                 setText(fullJob.result_text || "");
                 toast.success("Extraction complete");
             } else {
@@ -208,6 +246,7 @@ export default function UniversalExtractorPage() {
                                     toast.dismiss(t.id);
                                     const { data: existing } = await api.get(`/jobs/${detail.existing_job_id}`);
                                     setJob(existing);
+                                    setJobId(existing.id);
                                     setText(existing.result_text || "");
                                 }}
                                 style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem", alignSelf: "flex-start" }}

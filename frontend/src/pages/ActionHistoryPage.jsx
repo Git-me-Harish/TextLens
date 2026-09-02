@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, Fragment } from "react";
 import toast from "react-hot-toast";
 import { formatDistanceToNow } from "date-fns";
 import api from "../lib/api";
-import { Badge, Spinner } from "../components/ui";
+import { Badge, Spinner, Select } from "../components/ui";
 
 const STATUS_BADGE = {
   PENDING: "default",
@@ -114,28 +114,30 @@ export default function ActionHistoryPage() {
 
       {/* Filters */}
       <div style={{ display: "flex", gap: 10, marginBottom: "1.25rem", flexWrap: "wrap" }}>
-        <select
-          className="form-input"
-          style={{ width: "auto", minWidth: 150 }}
+        <Select
+          minWidth={170}
+          aria-label="Filter by domain"
           value={filters.domain}
           onChange={(e) => handleFilterChange("domain", e.target.value)}
-        >
-          <option value="">All domains</option>
-          {Object.entries(DOMAIN_LABELS).map(([val, label]) => (
-            <option key={val} value={val}>{label}</option>
-          ))}
-        </select>
-        <select
-          className="form-input"
-          style={{ width: "auto", minWidth: 150 }}
+          options={[
+            { value: "", label: "All domains" },
+            ...Object.entries(DOMAIN_LABELS).map(([value, label]) => ({ value, label })),
+          ]}
+        />
+        <Select
+          minWidth={190}
+          aria-label="Filter by status"
           value={filters.status}
           onChange={(e) => handleFilterChange("status", e.target.value)}
-        >
-          <option value="">All statuses</option>
-          {Object.keys(STATUS_BADGE).map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
+          options={[
+            { value: "", label: "All statuses" },
+            // Underscores read as machine output in a menu the user reads.
+            ...Object.keys(STATUS_BADGE).map((s) => ({
+              value: s,
+              label: s.charAt(0) + s.slice(1).toLowerCase().replace(/_/g, " "),
+            })),
+          ]}
+        />
         {(filters.domain || filters.status) && (
           <button className="btn btn-ghost btn-sm" onClick={() => setFilters({ domain: "", status: "" })}>
             Clear filters

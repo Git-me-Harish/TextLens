@@ -133,69 +133,85 @@ export default function useSSE() {
   }, []); // runs once — token is read inside connect() on every (re)connect
 }
 
-export function waitForJobSSE(jobId, api, timeoutMs = 5 * 60_000) {
+export const isTerminalStatus = (status) =>
+  status === "completed" || status === "failed";
+
+/**
+ * Wait for a job/run to reach a terminal state.
+ *
+ * SSE is the fast path, but it CANNOT be the only path. The backend
+ * publishes over Redis pub/sub (services/sse_service.py), which has no
+ * persistence and no replay: a message published while this browser has no
+ * live EventSource is gone permanently. That happens routinely —
+ * the tab was mid-reconnect, the connection dropped, or the work simply
+ * finished in the window between the POST returning and this subscribe
+ * landing. The worker had already committed the job, sent the email and
+ * fired the webhook, so from the user's side the extraction was visibly
+ * done everywhere EXCEPT the page they were watching, which sat on
+ * "Extracting…" until the old single 5-minute fallback fired.
+ *
+ * So: subscribe for the instant path, then reconcile against the API on an
+ * interval. The poll is what makes completion *guaranteed*; SSE just makes
+ * it feel immediate. The first poll runs straight away, which also closes
+ * the race where the work finished before we ever subscribed.
+ */
+function waitForTerminal(id, api, { eventKey, restPath, pollMs, timeoutMs }) {
   return new Promise((resolve) => {
     let settled = false;
+    let pollTimer = null;
+    let hardTimer = null;
 
-    const unsub = subscribeToSSE(`job_update:${jobId}`, (data) => {
-      if (settled) return;
-      if (data.status === "completed" || data.status === "failed") {
-        settled = true;
-        unsub();
-        clearTimeout(timer);
-        // The job_update SSE payload carries the id as `job_id`, not `id`
-        // (see worker/tasks.py's _publish_sse calls) — every caller expects
-        // `.id` (matching the REST fallback below and GET /jobs/{id}, both
-        // of which use JobOut's `id` field). Without this, `.id` is
-        // `undefined` whenever SSE resolves the fast path — silently
-        // breaking every subsequent call that needs the job id (agents/run,
-        // chat session creation, etc.), since axios/JSON.stringify just
-        // drops an undefined field instead of sending job_id: null.
-        resolve({ ...data, id: jobId });
-      }
+    const unsub = subscribeToSSE(`${eventKey}:${id}`, (data) => {
+      // The SSE payload carries the id as `job_id`/`run_id`, not `id` (see
+      // worker/tasks.py's _publish_sse calls), while every caller expects
+      // `.id` — matching GET /jobs/{id} and the poll below. Without this,
+      // `.id` is undefined whenever SSE wins the race, silently breaking
+      // every subsequent call that needs the id (agents/run, chat session
+      // creation, etc.), since JSON.stringify drops an undefined field
+      // rather than sending null.
+      if (isTerminalStatus(data.status)) finish({ ...data, id });
     });
 
-    // Safety net: if SSE misses the event, fall back to a single REST poll
-    const timer = setTimeout(async () => {
+    function finish(payload) {
       if (settled) return;
       settled = true;
       unsub();
+      clearInterval(pollTimer);
+      clearTimeout(hardTimer);
+      resolve(payload);
+    }
+
+    async function poll() {
+      if (settled) return;
       try {
-        const { data } = await api.get(`/jobs/${jobId}`);
-        resolve(data);
+        const { data } = await api.get(`${restPath}/${id}`);
+        if (data && isTerminalStatus(data.status)) finish(data);
       } catch {
-        resolve({ id: jobId, status: "unknown" });
+        // Transient (offline, 5xx, token refresh) — keep polling; the hard
+        // timeout below is the only thing that gives up.
       }
-    }, timeoutMs);
+    }
+
+    poll();
+    pollTimer = setInterval(poll, pollMs);
+    hardTimer = setTimeout(() => finish({ id, status: "unknown" }), timeoutMs);
   });
 }
 
-export function waitForAgentSSE(runId, api, timeoutMs = 10 * 60_000) {
-  return new Promise((resolve) => {
-    let settled = false;
+export function waitForJobSSE(jobId, api, timeoutMs = 10 * 60_000) {
+  return waitForTerminal(jobId, api, {
+    eventKey: "job_update",
+    restPath: "/jobs",
+    pollMs: 3000,
+    timeoutMs,
+  });
+}
 
-    const unsub = subscribeToSSE(`agent_update:${runId}`, (data) => {
-      if (settled) return;
-      if (data.status === "completed" || data.status === "failed") {
-        settled = true;
-        unsub();
-        clearTimeout(timer);
-        // Same fix as waitForJobSSE above — the agent_update SSE payload
-        // carries the id as `run_id`, not `id`.
-        resolve({ ...data, id: runId });
-      }
-    });
-
-    const timer = setTimeout(async () => {
-      if (settled) return;
-      settled = true;
-      unsub();
-      try {
-        const { data } = await api.get(`/agents/${runId}`);
-        resolve(data);
-      } catch {
-        resolve({ id: runId, status: "unknown" });
-      }
-    }, timeoutMs);
+export function waitForAgentSSE(runId, api, timeoutMs = 15 * 60_000) {
+  return waitForTerminal(runId, api, {
+    eventKey: "agent_update",
+    restPath: "/agents",
+    pollMs: 4000,
+    timeoutMs,
   });
 }

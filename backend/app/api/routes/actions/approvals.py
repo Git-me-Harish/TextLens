@@ -1,9 +1,10 @@
 """
 Action Stream (SSE) + Approval Routes
 
-  GET  /api/v1/actions/{id}/stream   — SSE real-time progress stream
-  POST /api/v1/actions/{id}/approve  — approve a HITL-gated action
-  POST /api/v1/actions/{id}/reject   — reject a HITL-gated action
+  GET  /api/v1/actions/{id}/stream          — SSE real-time progress stream
+  POST /api/v1/actions/{id}/approval-token  — re-issue the approval token
+  POST /api/v1/actions/{id}/approve         — approve a HITL-gated action
+  POST /api/v1/actions/{id}/reject          — reject a HITL-gated action
 """
 
 import asyncio
@@ -26,7 +27,13 @@ from app.schemas.action_schemas import (
     RejectActionRequest,
     SSEEventType,
 )
-from app.services.approval_service import approve_action, reject_action
+from app.services.action_service import get_action_run
+from app.services.approval_service import (
+    approve_action,
+    generate_approval_token,
+    reject_action,
+    store_approval_token,
+)
 from app.worker.action_tasks import resume_action_task
 
 router = APIRouter()
@@ -144,6 +151,59 @@ async def stream_action(
 # ─────────────────────────────────────────────────────────────────────────────
 # Approve
 # ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/{action_run_id}/approval-token",
+    summary="Re-issue the approval token for a run awaiting approval",
+)
+async def reissue_approval_token(
+    action_run_id: str,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Hand the owner a fresh approval token for a run that is still awaiting
+    approval.
+
+    Why this exists: the approval token is delivered exactly once, in the
+    `plan_ready` SSE event, and only a SHA-256 hash of it is ever stored — so
+    it cannot be read back out of the database. That made a reload (or a
+    dropped connection, or opening the run on another device) while a plan sat
+    awaiting approval a dead end: the plan was visible via GET /actions/{id},
+    but the token needed to act on it was gone, and the action could never be
+    approved or completed. Only cancelling was left.
+
+    Re-issuing is no weaker than the original delivery: this endpoint
+    authenticates the caller and get_action_run enforces that they own the
+    run, which is exactly what the SSE stream checks before streaming the
+    token in the first place. The new token replaces the stored hash, so any
+    previously issued token stops working — a stale tab cannot approve behind
+    the user's back, and the token stays single-use with the same TTL.
+    """
+    try:
+        run = await get_action_run(db, action_run_id, current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    if run.status != "AWAITING_APPROVAL":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Action run is '{run.status}', not awaiting approval — "
+                "there is nothing to approve."
+            ),
+        )
+
+    token, expires_at = generate_approval_token(run.id, current_user.id)
+    await store_approval_token(db, run, token, expires_at)
+
+    return {
+        "action_run_id": run.id,
+        "approval_token": token,
+        "approval_expires_at": expires_at,
+        "plan": run.plan,
+    }
+
 
 @router.post(
     "/{action_run_id}/approve",

@@ -61,3 +61,5 @@ export function Spinner({ size = 24 }) {
     }} />
   );
 }
+// Custom dropdown — see Select.jsx for why the native <select> was replaced.
+export { default as Select } from "./Select";

@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { Trash2, Download, Eye, ChevronLeft, ChevronRight, X, AlertTriangle } from "lucide-react";
 import toast from "react-hot-toast";
+import { useConfirm } from "../lib/useConfirm";
 import { formatDistanceToNow } from "date-fns";
 import api from "../lib/api";
-import { Badge, Spinner } from "../components/ui";
+import { Badge, Spinner, Select } from "../components/ui";
 
 const STATUS_BADGE = { completed: "success", failed: "danger", running: "processing", pending: "warning" };
 
@@ -116,6 +117,12 @@ function ResultDrawer({ run, onClose }) {
             </div>
             <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--ink-muted)" }}>{run.confidence_score}% confidence</span>
           </div>
+          {run.user_instructions && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", fontSize: "0.8rem", color: "var(--ink-muted)" }}>
+              <span style={{ fontWeight: 600, color: "var(--ink-secondary)" }}>Instructions given: </span>
+              "{run.user_instructions}"
+            </div>
+          )}
         </div>
       )}
 
@@ -157,6 +164,7 @@ function ResultDrawer({ run, onClose }) {
 }
 
 export default function AgentHistoryPage() {
+  const { confirm, confirmDialog } = useConfirm();
   const [runs, setRuns] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -180,10 +188,15 @@ export default function AgentHistoryPage() {
 
   useEffect(() => { load(page); }, [page, domainFilter, statusFilter]);
 
-  const deleteRun = async (id) => {
+  const deleteRun = async (id, label) => {
+    if (!await confirm({
+      title: "Move to Trash?",
+      message: `${label || "This pipeline run"} will move to Trash. You can restore it for 30 days.`,
+      confirmLabel: "Move to Trash",
+    })) return;
     try {
       await api.delete(`/agents/${id}`);
-      toast.success("Deleted");
+      toast.success("Moved to Trash");
       load(page);
       if (selectedRun?.id === id) setSelectedRun(null);
     } catch { toast.error("Delete failed"); }
@@ -201,26 +214,31 @@ export default function AgentHistoryPage() {
 
         {/* Filters */}
         <div style={{ display: "flex", gap: 10, marginBottom: "1.25rem", flexWrap: "wrap" }}>
-          <select
+          <Select
+            minWidth={170}
+            aria-label="Filter by domain"
             value={domainFilter}
             onChange={e => { setDomainFilter(e.target.value); setPage(1); }}
-            className="form-input"
-            style={{ width: "auto", minWidth: 150 }}
-          >
-            <option value="">All domains</option>
-            {DOMAINS.map(d => <option key={d} value={d}>{d.charAt(0).toUpperCase() + d.slice(1)}</option>)}
-          </select>
-          <select
+            options={[
+              { value: "", label: "All domains" },
+              ...DOMAINS.map(d => ({ value: d, label: d.charAt(0).toUpperCase() + d.slice(1) })),
+            ]}
+          />
+          <Select
+            minWidth={160}
+            aria-label="Filter by status"
             value={statusFilter}
             onChange={e => { setStatusFilter(e.target.value); setPage(1); }}
-            className="form-input"
-            style={{ width: "auto", minWidth: 140 }}
-          >
-            <option value="">All statuses</option>
-            <option value="completed">Completed</option>
-            <option value="failed">Failed</option>
-            <option value="running">Running</option>
-          </select>
+            options={[
+              { value: "", label: "All statuses" },
+              { value: "completed", label: "Completed" },
+              { value: "failed", label: "Failed" },
+              { value: "running", label: "Running" },
+              // 'cancelled' exists on AgentStatus now (migration 022) — a run
+              // the user stopped is otherwise unfilterable in this list.
+              { value: "cancelled", label: "Cancelled" },
+            ]}
+          />
           {(domainFilter || statusFilter) && (
             <button className="btn btn-ghost btn-sm" onClick={() => { setDomainFilter(""); setStatusFilter(""); setPage(1); }}>
               Clear filters
@@ -285,7 +303,7 @@ export default function AgentHistoryPage() {
                             <Download size={14} />
                           </button>
                         )}
-                        <button onClick={() => deleteRun(run.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-muted)", padding: 4 }}>
+                        <button onClick={() => deleteRun(run.id, `${run.domain} · ${run.pipeline_type}`)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-muted)", padding: 4 }}>
                           <Trash2 size={14} />
                         </button>
                       </div>
@@ -316,6 +334,7 @@ export default function AgentHistoryPage() {
       {/* Overlay */}
       {selectedRun && <div onClick={() => setSelectedRun(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.2)", zIndex: 250 }} />}
       <ResultDrawer run={selectedRun} onClose={() => setSelectedRun(null)} />
+      {confirmDialog}
     </>
   );
 }

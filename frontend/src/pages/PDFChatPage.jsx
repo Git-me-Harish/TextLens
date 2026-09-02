@@ -10,6 +10,7 @@ import toast from "react-hot-toast";
 import api, { errMsg } from "../lib/api";
 import { Spinner, Badge } from "../components/ui";
 import { waitForJobSSE } from "../hooks/useSSE";
+import { usePersistedState } from "../lib/usePersistedState";
 
 const MAX_QUESTION_LENGTH = 2000; // mirrors AskRequest on the backend
 
@@ -203,12 +204,14 @@ function TypingIndicator() {
 /*  Main page  */
 export default function PDFChatPage() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [session, setSession]   = useState(null);
   const [messages, setMessages] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [resuming, setResuming]   = useState(false);
-  const [input, setInput]         = useState("");
+  // A half-typed question is real work. Persist it so a reload or a dropped
+  // connection doesn't silently discard what the user was in the middle of.
+  const [input, setInput]         = usePersistedState("chat:draft", "");
   const [asking, setAsking]       = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
   const [documents, setDocuments] = useState([]);
@@ -216,6 +219,7 @@ export default function PDFChatPage() {
   const [selectingId, setSelectingId] = useState(null);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
+  const loadedSessionRef = useRef(null);   // session already in memory
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, asking]);
 
@@ -233,18 +237,31 @@ export default function PDFChatPage() {
       const { data: sess } = await api.post("/chat/sessions", { job_id: jobId });
       setSession({ id: sess.id, title: sess.title, job_id: jobId, suggested_questions: sess.suggested_questions, filename });
       setMessages([{ role: "system", content: `Document loaded: ${filename}` }]);
+
+      // Put the session in the URL. The page already knows how to resume from
+      // ?session=ID, but nothing ever wrote it there — so a session started by
+      // upload or from the picker was lost on reload even though the server
+      // had the whole transcript. Writing it here makes reload survivable and
+      // the conversation linkable, with replace:true so it doesn't add a
+      // history entry the back button would trip over.
+      loadedSessionRef.current = sess.id;
+      setSearchParams({ session: sess.id }, { replace: true });
+
       setTimeout(() => inputRef.current?.focus(), 100);
     } catch (err) {
       toast.error(errMsg(err, "Could not start chat session"));
     } finally {
       setSelectingId(null);
     }
-  }, []);
+  }, [setSearchParams]);
 
-  // Resume from ?session=ID
+  // Resume from ?session=ID — on reload, or when the URL is set above
   useEffect(() => {
     const sid = searchParams.get("session");
-    if (!sid) return;
+    // Skip when this session is already loaded in memory, so writing the URL
+    // above doesn't refetch and wipe the messages we just set.
+    if (!sid || loadedSessionRef.current === sid) return;
+    loadedSessionRef.current = sid;
     setResuming(true);
     api.get(`/chat/sessions/${sid}`)
       .then(({ data }) => {

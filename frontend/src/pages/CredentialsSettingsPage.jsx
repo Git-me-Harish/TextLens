@@ -11,6 +11,7 @@
 import { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import toast from "react-hot-toast";
+import { useConfirm } from "../lib/useConfirm";
 import { Check, ExternalLink, Link2, Lock } from "lucide-react";
 import api from "../lib/api";
 import { Badge, Button, Card, Spinner } from "../components/ui";
@@ -25,6 +26,7 @@ const OAUTH_ERROR_MESSAGES = {
 };
 
 export default function CredentialsSettingsPage() {
+  const { confirm, confirmDialog } = useConfirm();
   const [services, setServices] = useState({});         // catalog from /services
   const [connected, setConnected] = useState(new Set()); // set of service_names
   const [selected, setSelected] = useState(null);
@@ -99,7 +101,12 @@ export default function CredentialsSettingsPage() {
   };
 
   const handleDisconnect = async (serviceName) => {
-    if (!window.confirm(`Disconnect ${serviceName.replace(/_/g, " ")}? Any scheduled actions requiring this service will fail.`)) return;
+    if (!await confirm({
+      title: `Disconnect ${serviceName.replace(/_/g, " ")}?`,
+      message: "The stored credentials are deleted permanently, and any scheduled action needing this service will fail until you reconnect.",
+      confirmLabel: "Disconnect",
+      tone: "danger",
+    })) return;
     setDisconnecting(serviceName);
     try {
       await api.delete(`/credentials/${serviceName}`);
@@ -170,6 +177,10 @@ export default function CredentialsSettingsPage() {
           </Card>
         </div>
       )}
+      {/* Belongs to this component — `confirm` and `confirmDialog` come from
+          the useConfirm() call above, so the dialog has to render inside the
+          same component that owns them. */}
+      {confirmDialog}
     </div>
   );
 }

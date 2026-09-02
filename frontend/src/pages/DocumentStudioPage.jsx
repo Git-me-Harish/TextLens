@@ -9,6 +9,7 @@ import toast from "react-hot-toast";
 import api, { errMsg } from "../lib/api";
 import { Spinner } from "../components/ui";
 import { waitForJobSSE } from "../hooks/useSSE";
+import { usePersistedState, useHydratedRecord } from "../lib/usePersistedState";
 
 // Lazy-loaded — pdfjs-dist + pdf-lib add ~900KB and only the PDF Editor
 // tool needs them, so most Studio visitors never pay for this bundle.
@@ -456,11 +457,31 @@ function OperationPanel({ action, onComplete }) {
 const PAGE_SIZE = 6;
 
 export default function DocumentStudioPage() {
-  const [activeAction, setActiveAction] = useState(null);
-  const [result, setResult]             = useState(null);
-  const [page, setPage]                 = useState(0);
+  // The selected tool and carousel page survive a reload. Only the action's
+  // id is stored, never the action object — its `icon` is a React component,
+  // which JSON silently drops, so a restored object would be missing the very
+  // field the card renders. Deriving from ACTIONS keeps it whole.
+  const [activeActionId, setActiveActionId] = usePersistedState("studio:actionId", null);
+  const [page, setPage]                     = usePersistedState("studio:page", 0);
+  const [resultJobId, setResultJobId]       = usePersistedState("studio:resultJobId", null);
 
-  const reset = () => { setResult(null); setActiveAction(null); };
+  const activeAction = ACTIONS.find((a) => a.id === activeActionId) || null;
+
+  const { data: result, setData: setResult } = useHydratedRecord(
+    resultJobId,
+    (id) => api.get(`/jobs/${id}`).then((r) => r.data),
+    { onMissing: () => setResultJobId(null) },
+  );
+
+  const setActiveAction = (a) => setActiveActionId(a?.id ?? null);
+  const onOperationComplete = (job) => {
+    setResult(job);
+    setResultJobId(job?.id ?? null);
+  };
+
+  const reset = () => {
+    setResultJobId(null); setResult(null); setActiveActionId(null);
+  };
 
   const pageCount = Math.ceil(ACTIONS.length / PAGE_SIZE);
   const visibleActions = ACTIONS.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
@@ -500,7 +521,7 @@ export default function DocumentStudioPage() {
               key={action.id}
               action={action}
               selected={activeAction?.id === action.id}
-              onSelect={(a) => { setActiveAction(a); setResult(null); }}
+              onSelect={(a) => { setActiveAction(a); setResult(null); setResultJobId(null); }}
             />
           ))}
         </div>
@@ -527,7 +548,7 @@ export default function DocumentStudioPage() {
         <ResultPanel job={result} action={activeAction} onReset={reset} />
       ) : activeAction?.panel === "editor" ? (
         <Suspense fallback={lazyFallback}>
-          <PdfEditor action={activeAction} onComplete={(job) => setResult(job)} />
+          <PdfEditor action={activeAction} onComplete={onOperationComplete} />
         </Suspense>
       ) : activeAction?.panel === "summarize" ? (
         <Suspense fallback={lazyFallback}>
@@ -536,7 +557,7 @@ export default function DocumentStudioPage() {
       ) : activeAction ? (
         <OperationPanel
           action={activeAction}
-          onComplete={(job) => setResult(job)}
+          onComplete={onOperationComplete}
         />
       ) : (
         <div className="card" style={{ padding: "2rem", textAlign: "center" }}>

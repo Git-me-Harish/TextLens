@@ -1,16 +1,22 @@
 /**
- * PipelinesPage — Track 2 hardened.
+ * PipelinesPage
  *
- * What changed from V1
- * 
- * OCR job wait (was: busy-wait for loop, 40 × 1500ms = up to 60 s of polling)
- *   → waitForJobSSE(jobId, api) — resolves the moment the SSE event arrives.
- *     Zero unnecessary requests. Falls back to a single REST poll after 5 min
- *     in case of a dropped SSE connection.
+ * Progress tracking
+ *   SSE is the fast path for both the OCR job and the agent run, but never
+ *   the only path — the backend publishes over Redis pub/sub, which has no
+ *   replay, so an event published while this tab has no live EventSource is
+ *   lost for good. Both waits reconcile against the API on an interval
+ *   (waitForJobSSE, and the agent effect below) so a missed event costs a
+ *   few seconds of latency instead of leaving the page stuck on "Running"
+ *   while the work has demonstrably finished everywhere else.
  *
- * Agent run wait (was: setInterval every 2000ms)
- *   → subscribeToSSE(`agent_update:${runId}`) in useEffect — fires instantly
- *     when the Celery task publishes the result. No timer, no DB reads.
+ * State persistence
+ *   Everything needed to rebuild the current run is mirrored to
+ *   sessionStorage and rehydrated on mount. Navigating away and back used to
+ *   drop the user at step 0 with a finished run they could no longer see.
+ *   Only ids are stored — the job and run themselves are re-fetched, so what
+ *   comes back reflects reality rather than a stale snapshot (a run that
+ *   completed while the user was on another page restores as complete).
  */
 import { useState, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
@@ -25,7 +31,15 @@ import { useAgent } from "../lib/AgentContext";
 import DrivePickerModal from "../components/DrivePickerModal";
 import ActionPanel from "../components/actions/ActionPanel";
 import ActionRunner from "../components/actions/ActionRunner";
-import { subscribeToSSE, waitForJobSSE } from "../hooks/useSSE";
+import { subscribeToSSE, waitForJobSSE, isTerminalStatus } from "../hooks/useSSE";
+import { usePersistedState, clearPersisted, useHydratedRecord } from "../lib/usePersistedState";
+import { DomainIcon } from "../lib/domainIcons";
+import { INSTRUCTIONS_MAX_LEN, INSTRUCTIONS_HELP_TEXT, instructionsPlaceholder } from "../lib/instructionsHelp";
+
+const P = "pipelines:";   // persisted-key prefix for this page
+
+const fetchJob = (id) => api.get(`/jobs/${id}`).then((r) => r.data);
+const fetchRun = (id) => api.get(`/agents/${id}`).then((r) => r.data);
 
 /*  Auto-classifier suggestion banner  */
 function ClassifierBanner({ result, catalog, onAccept, onDismiss }) {
@@ -219,49 +233,126 @@ function ConfidenceBar({ score }) {
 /*  Main page  */
 export default function PipelinesPage() {
   const { startAgent, clearAgent } = useAgent();
-  const [step, setStep]                   = useState(0);
-  const [catalog, setCatalog]             = useState(null);
-  const [ocrJob, setOcrJob]               = useState(null);
-  const [uploading, setUploading]         = useState(false);
-  const [selectedDomain, setSelectedDomain]   = useState(null);
-  const [selectedPipeline, setSelectedPipeline] = useState(null);
-  const [instructions, setInstructions]   = useState("");
-  const [agentRun, setAgentRun]           = useState(null);
-  const [running, setRunning]             = useState(false);
-  const [activeTab, setActiveTab]         = useState("structured");
-  const [copied, setCopied]               = useState(false);
-  const [classifying, setClassifying]     = useState(false);
-  const [classifierResult, setClassifierResult] = useState(null);
-  const [driveOpen, setDriveOpen]         = useState(false);
-  const [activeActionRunId, setActiveActionRunId] = useState(null);
-  const [activeActionLabel, setActiveActionLabel] = useState("Document action");
+
+  // Persisted — the user's own intent. Restored synchronously on first render,
+  // so a reload mid-flow keeps the file, the pipeline choice and the typed
+  // instructions instead of silently discarding them.
+  const [step, setStep]                         = usePersistedState(P + "step", 0);
+  const [ocrJobId, setOcrJobId]                 = usePersistedState(P + "ocrJobId", null);
+  const [agentRunId, setAgentRunId]             = usePersistedState(P + "agentRunId", null);
+  const [selectedDomain, setSelectedDomain]     = usePersistedState(P + "domain", null);
+  const [selectedPipeline, setSelectedPipeline] = usePersistedState(P + "pipeline", null);
+  const [instructions, setInstructions]         = usePersistedState(P + "instructions", "");
+  const [activeTab, setActiveTab]               = usePersistedState(P + "tab", "structured");
+  const [classifierResult, setClassifierResult] = usePersistedState(P + "classifier", null);
+  const [activeActionRunId, setActiveActionRunId]   = usePersistedState(P + "actionRunId", null);
+  const [activeActionLabel, setActiveActionLabel]   = usePersistedState(P + "actionLabel", "Document action");
+
+  // Server-owned bodies — rehydrated from the persisted ids above rather than
+  // stored. They can be megabytes and they go stale; the id is the durable part.
+  const { data: ocrJob,   setData: setOcrJob }   =
+    useHydratedRecord(ocrJobId, fetchJob, { onMissing: () => resetAll() });
+  const { data: agentRun, setData: setAgentRun } =
+    useHydratedRecord(agentRunId, fetchRun, { onMissing: () => setAgentRunId(null) });
+
+  // Ephemeral — genuinely meaningless across a reload.
+  const [catalog, setCatalog]         = useState(null);
+  const [uploading, setUploading]     = useState(false);
+  const [running, setRunning]         = useState(false);
+  const [copied, setCopied]           = useState(false);
+  const [classifying, setClassifying] = useState(false);
+  const [driveOpen, setDriveOpen]     = useState(false);
+  const [cancelling, setCancelling]   = useState(false);
 
   //  Catalog fetch 
   useEffect(() => {
     api.get("/agents/catalog").then((r) => setCatalog(r.data));
   }, []);
 
-  //  SSE agent run listener (replaces setInterval every 2000ms) 
+  //  Agent run progress — SSE for immediacy, polling for certainty
   useEffect(() => {
-    if (!agentRun || agentRun.status === "completed" || agentRun.status === "failed") return;
+    if (!agentRun?.id || isTerminalStatus(agentRun.status)) return;
 
-    const unsub = subscribeToSSE(`agent_update:${agentRun.id}`, (data) => {
+    let cancelled = false;
+    let done = false;   // guards against SSE and the poll both reporting the
+                        // same completion and firing two toasts
+
+    const apply = (data) => {
+      if (cancelled || done) return;
       setAgentRun((prev) => ({ ...prev, ...data }));
-      if (data.status === "completed") {
+      if (isTerminalStatus(data.status)) {
+        done = true;
         setStep(3);
         clearAgent();
-        toast.success("Pipeline complete");
-      } else if (data.status === "failed") {
-        setStep(3);
-        clearAgent();
-        toast.error(data.error_message || "Pipeline failed");
+        if (data.status === "completed") toast.success("Pipeline complete");
+        else toast.error(data.error_message || "Pipeline failed");
       }
-    });
+    };
 
-    return unsub; // cleanup removes subscription on unmount or agentRun change
+    const unsub = subscribeToSSE(`agent_update:${agentRun.id}`, apply);
+
+    // This effect previously had no fallback whatsoever: a single missed
+    // agent_update left the page on "Running…" indefinitely, with no timeout
+    // to rescue it, even though the run had already finished server-side.
+    const poll = async () => {
+      if (cancelled || done) return;
+      try {
+        const { data } = await api.get(`/agents/${agentRun.id}`);
+        if (data && data.status !== agentRun.status) apply(data);
+      } catch {
+        // Transient — keep polling.
+      }
+    };
+
+    const timer = setInterval(poll, 4000);
+    poll();   // also covers a run that finished before this subscribe landed
+
+    return () => {
+      cancelled = true;
+      unsub();
+      clearInterval(timer);
+    };
   }, [agentRun?.id, agentRun?.status]);
 
-  //  File upload + SSE-driven OCR wait 
+  //  A run that finished while the user was away lands on the results step
+  useEffect(() => {
+    if (agentRun && isTerminalStatus(agentRun.status) && step < 3) setStep(3);
+  }, [agentRun?.status]);
+
+  //  Resume an extraction that was still running when the page went away
+  useEffect(() => {
+    if (!ocrJob || isTerminalStatus(ocrJob.status)) return;
+
+    // Reload or navigation during extraction used to orphan the job entirely.
+    // The id survived, so pick the wait back up exactly where it left off.
+    let cancelled = false;
+    setUploading(true);
+    waitForJobSSE(ocrJob.id, api)
+      .then((settled) => { if (!cancelled) onExtractionSettled(settled); })
+      .finally(() => { if (!cancelled) setUploading(false); });
+
+    return () => { cancelled = true; };
+  }, [ocrJob?.id, ocrJob?.status]);
+
+  // Shared by the upload path and by a resume, so both land in the same state.
+  const onExtractionSettled = (job) => {
+    if (job.status === "completed") {
+      setOcrJob(job);
+      setOcrJobId(job.id);
+      setStep((prev) => (prev > 1 ? prev : 1));   // don't drag a resumed run backwards
+      toast.success("Text extracted — detecting best pipeline…");
+      setClassifying(true);
+      api.post("/agents/classify", { job_id: job.id })
+        .then((r) => setClassifierResult(r.data))
+        .catch(() => {})
+        .finally(() => setClassifying(false));
+    } else {
+      toast.error(job.error_message || "Extraction failed");
+      resetAll();
+    }
+  };
+
+  //  File upload + SSE-driven OCR wait
   const onDrop = async ([file]) => {
     if (!file) return;
     setUploading(true);
@@ -275,22 +366,15 @@ export default function PipelinesPage() {
         headers: { "Content-Type": "multipart/form-data" },
       });
 
-      // Wait via SSE — resolves the instant the Celery task completes.
-      // Falls back to one REST poll if SSE misses the event (5 min timeout).
-      const job = await waitForJobSSE(submitted.id, api);
+      // Persist the id the moment it exists, before the wait. Extraction is
+      // the longest part of the flow and the likeliest moment for a reload or
+      // a dropped connection — without this, leaving mid-extraction orphaned
+      // the job and dropped the user back at step 0 with nothing to show.
+      setOcrJobId(submitted.id);
 
-      if (job.status === "completed") {
-        setOcrJob(job);
-        setStep(1);
-        toast.success("Text extracted — detecting best pipeline…");
-        setClassifying(true);
-        api.post("/agents/classify", { job_id: job.id })
-          .then((r) => setClassifierResult(r.data))
-          .catch(() => {})
-          .finally(() => setClassifying(false));
-      } else {
-        toast.error(job.error_message || "Extraction failed");
-      }
+      // SSE for immediacy, reconciling poll for certainty (see useSSE.js).
+      const job = await waitForJobSSE(submitted.id, api);
+      onExtractionSettled(job);
     } catch (err) {
       const detail = err.response?.data?.detail;
       if (err.response?.status === 409 && detail?.code === "duplicate_file") {
@@ -305,8 +389,7 @@ export default function PipelinesPage() {
                 <button
                   onClick={async () => {
                     toast.dismiss(t.id);
-                    const { data } = await api.get(`/jobs/${detail.existing_job_id}`);
-                    setOcrJob(data);
+                    setOcrJobId(detail.existing_job_id);
                     setStep(1);
                   }}
                   style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.78rem" }}
@@ -350,8 +433,9 @@ export default function PipelinesPage() {
         user_instructions: instructions,
       });
       setAgentRun(data);
+      setAgentRunId(data.id);   // survives a reload while the agent is running
       startAgent(selectedDomain, selectedPipeline, catalog[selectedDomain]?.pipelines[selectedPipeline]?.label);
-      // SSE useEffect above now takes over — no polling here
+      // The progress effect above takes over — SSE plus reconciling poll.
     } catch (err) {
       toast.error(errMsg(err, "Failed to start agent"));
       setStep(1);
@@ -360,12 +444,37 @@ export default function PipelinesPage() {
     }
   };
 
-  const reset = () => {
-    setStep(0); setOcrJob(null); setSelectedDomain(null);
-    setSelectedPipeline(null); setAgentRun(null);
+  // Stop a run the user no longer wants. Worth offering mid-run rather than
+  // only letting them delete the result afterwards: if the run is still queued
+  // the model call never happens, so this genuinely saves the spend rather
+  // than just hiding the output.
+  const cancelRun = async () => {
+    if (!agentRun?.id) return;
+    setCancelling(true);
+    try {
+      await api.post(`/agents/${agentRun.id}/cancel`);
+      toast.success("Run cancelled");
+      setAgentRun((prev) => ({ ...(prev || {}), status: "cancelled" }));
+      clearAgent();
+      setStep(1);   // back to the pipeline picker, selections intact
+    } catch (err) {
+      toast.error(errMsg(err, "Could not cancel this run"));
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  // Full teardown, including the persisted snapshot. Used by "Start over" and
+  // whenever the underlying job turns out to be gone.
+  function resetAll() {
+    clearPersisted(P);
+    setStep(0); setOcrJobId(null); setAgentRunId(null);
+    setOcrJob(null); setAgentRun(null);
+    setSelectedDomain(null); setSelectedPipeline(null);
     setInstructions(""); setClassifierResult(null); clearAgent();
     setActiveActionRunId(null); setActiveActionLabel("Document action");
-  };
+  }
+  const reset = resetAll;
 
   const copyJSON = () => {
     navigator.clipboard.writeText(JSON.stringify(agentRun?.structured_result, null, 2));
@@ -472,7 +581,7 @@ export default function PipelinesPage() {
                     className={`domain-card ${selectedDomain === key ? "selected" : ""}`}
                     style={{ padding: "0.875rem 1rem", display: "flex", alignItems: "center", gap: 12 }}>
                     <div style={{ width: 32, height: 32, borderRadius: 8, background: domain.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: domain.accent }} />
+                      <DomainIcon domain={key} size={16} color={domain.accent} />
                     </div>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "var(--ink)" }}>{domain.label}</div>
@@ -506,17 +615,24 @@ export default function PipelinesPage() {
               )}
               {selectedPipeline && (
                 <div className="card" style={{ padding: "1.5rem" }}>
-                  <h2 style={{ fontSize: "0.95rem", fontWeight: 600, marginBottom: "0.75rem" }}>
+                  <h2 style={{ fontSize: "0.95rem", fontWeight: 600, marginBottom: 4 }}>
                     Instructions <span style={{ fontWeight: 400, color: "var(--ink-muted)" }}>(optional)</span>
                   </h2>
+                  <p style={{ fontSize: "0.78rem", color: "var(--ink-muted)", marginBottom: "0.75rem", lineHeight: 1.5 }}>
+                    {INSTRUCTIONS_HELP_TEXT}
+                  </p>
                   <textarea
                     className="form-input"
-                    placeholder="Any specific focus or context for the agent..."
+                    placeholder={instructionsPlaceholder(selectedDomain)}
                     value={instructions}
-                    onChange={(e) => setInstructions(e.target.value)}
+                    onChange={(e) => setInstructions(e.target.value.slice(0, INSTRUCTIONS_MAX_LEN))}
+                    maxLength={INSTRUCTIONS_MAX_LEN}
                     rows={3}
                   />
-                  <Button onClick={runAgent} loading={running} disabled={running} style={{ width: "100%", marginTop: "0.875rem" }}>
+                  <div style={{ textAlign: "right", fontSize: "0.7rem", color: instructions.length > INSTRUCTIONS_MAX_LEN - 100 ? "var(--warning)" : "var(--ink-muted)", marginTop: 3 }}>
+                    {instructions.length}/{INSTRUCTIONS_MAX_LEN}
+                  </div>
+                  <Button onClick={runAgent} loading={running} disabled={running} style={{ width: "100%", marginTop: "0.5rem" }}>
                     Run {catalog[selectedDomain]?.pipelines[selectedPipeline]?.label}
                   </Button>
                 </div>
@@ -536,6 +652,16 @@ export default function PipelinesPage() {
           <p style={{ color: "var(--ink-muted)", marginTop: "0.5rem", fontSize: "0.9rem" }}>
             Running {catalog[selectedDomain]?.pipelines[selectedPipeline]?.label}…
           </p>
+          {agentRun?.id && (
+            <button
+              onClick={cancelRun}
+              disabled={cancelling}
+              className="btn btn-outline btn-sm"
+              style={{ marginTop: "1.5rem" }}
+            >
+              <X size={13} /> {cancelling ? "Cancelling…" : "Cancel run"}
+            </button>
+          )}
         </div>
       )}
 
@@ -580,6 +706,15 @@ export default function PipelinesPage() {
               <div style={{ fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--ink-muted)", marginBottom: "0.5rem" }}>AI Summary</div>
               <p style={{ color: "var(--ink-secondary)", fontSize: "0.9rem", lineHeight: 1.6, marginBottom: "1rem" }}>{agentRun.summary}</p>
               <ConfidenceBar score={agentRun.confidence_score || 0} />
+              {agentRun.user_instructions && (
+                // Ties the output back to what actually produced it. Before
+                // this, the instructions box influenced the result and then
+                // vanished with no way to see, later, what was asked for.
+                <div style={{ marginTop: "1rem", paddingTop: "0.875rem", borderTop: "1px solid var(--border)", fontSize: "0.8rem", color: "var(--ink-muted)" }}>
+                  <span style={{ fontWeight: 600, color: "var(--ink-secondary)" }}>Your instructions: </span>
+                  "{agentRun.user_instructions}"
+                </div>
+              )}
             </div>
           )}
 

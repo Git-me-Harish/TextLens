@@ -402,3 +402,86 @@ textarea.form-input { resize: vertical; min-height: 80px; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
+
+/* Select — custom dropdown (components/ui/Select.jsx)
+   Replaces native <select>, whose open list is drawn by the OS and cannot be
+   styled: the grey system highlight and square corners were the visible
+   mismatch with the rest of the UI. Trigger deliberately mirrors .form-input
+   so a Select sitting next to an input looks like the same family. */
+.select-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem 0.6rem 0.875rem;
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  line-height: 1.2;
+  color: var(--ink);
+  background: #fff;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.select-trigger:hover:not(:disabled) { border-color: var(--border-strong); }
+.select-trigger:focus-visible,
+.select-trigger[data-open] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37,99,168,0.1);
+  outline: none;
+}
+.select-trigger:disabled { opacity: 0.55; cursor: not-allowed; background: var(--paper-2); }
+
+.select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-placeholder { color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.select-chevron { color: var(--ink-muted); flex-shrink: 0; transition: transform var(--transition); }
+.select-trigger[data-open] .select-chevron { transform: rotate(180deg); }
+
+.select-menu {
+  position: absolute;
+  z-index: 1100;            /* above page chrome, below modals (1200) */
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 100%;
+  max-height: 340px;   /* ~9 rows before scrolling — most menus here fit */
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.3rem;
+  list-style: none;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  animation: select-in 0.12s ease-out;
+}
+@keyframes select-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .select-menu { animation: none; }
+  .select-chevron { transition: none; }
+}
+
+.select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.85rem;
+  color: var(--ink-secondary);
+  border-radius: calc(var(--radius) - 4px);
+  cursor: pointer;
+  white-space: nowrap;
+}
+/* Hover and keyboard highlight are the same state on purpose — two different
+   highlights visible at once is exactly what makes a custom menu feel wrong. */
+.select-option[data-active] { background: var(--paper-2); color: var(--ink); }
+.select-option[data-selected] { color: var(--accent); font-weight: 600; }
+.select-option[data-selected] svg { color: var(--accent); }
+.select-option--empty { color: var(--ink-muted); cursor: default; justify-content: flex-start; }

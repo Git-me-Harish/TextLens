@@ -104,6 +104,7 @@ async def get_action_run(
         select(ActionRun).where(
             ActionRun.id == action_run_id,
             ActionRun.user_id == user_id,
+            ActionRun.deleted_at.is_(None),   # trashed reads as gone
         )
     )
     run = result.scalar_one_or_none()
@@ -121,7 +122,9 @@ async def list_action_runs(
     offset: int = 0,
 ) -> list[ActionRun]:
     """List action runs for a user with optional filters."""
-    query = select(ActionRun).where(ActionRun.user_id == user_id)
+    query = select(ActionRun).where(
+        ActionRun.user_id == user_id, ActionRun.deleted_at.is_(None)
+    )
     if domain:
         query = query.where(ActionRun.domain == domain)
     if status:

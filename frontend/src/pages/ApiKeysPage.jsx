@@ -5,6 +5,7 @@ import {
   RefreshCw, ToggleLeft, ToggleRight,
 } from "lucide-react";
 import toast from "react-hot-toast";
+import { useConfirm } from "../lib/useConfirm";
 import { formatDistanceToNow, format } from "date-fns";
 import api, { errMsg } from "../lib/api";
 import { Button, Spinner, Badge } from "../components/ui";
@@ -151,6 +152,7 @@ function RevealKey({ plainKey }) {
 }
 
 function APIKeysSection() {
+  const { confirm, confirmDialog } = useConfirm();
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -168,7 +170,14 @@ function APIKeysSection() {
   };
 
   const handleRevoke = async (id) => {
-    if (!confirm("Revoke this API key? Any apps using it will stop working.")) return;
+    // API keys are secrets, deliberately excluded from Trash: revoking has
+    // to mean revoked now, not recoverable for 30 days.
+    if (!await confirm({
+      title: "Revoke this API key?",
+      message: "Any app or script still using this key will stop working immediately. This cannot be undone.",
+      confirmLabel: "Revoke key",
+      tone: "danger",
+    })) return;
     try {
       await api.delete(`/keys/${id}`);
       setKeys((prev) => prev.map((k) => k.id === id ? { ...k, is_active: false } : k));
@@ -308,6 +317,7 @@ print(response.json())`}
       {showModal && (
         <NewKeyModal onClose={() => setShowModal(false)} onCreate={handleCreate} />
       )}
+      {confirmDialog}
     </div>
   );
 }
@@ -408,6 +418,7 @@ function NewWebhookModal({ onClose, onCreate }) {
 }
 
 function WebhooksSection() {
+  const { confirm, confirmDialog } = useConfirm();
   const [webhooks, setWebhooks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -423,7 +434,12 @@ function WebhooksSection() {
   };
 
   const handleDelete = async (id) => {
-    if (!confirm("Delete this webhook?")) return;
+    if (!await confirm({
+      title: "Delete this webhook?",
+      message: "Deliveries to this endpoint will stop immediately. This cannot be undone.",
+      confirmLabel: "Delete webhook",
+      tone: "danger",
+    })) return;
     try {
       await api.delete(`/webhooks/${id}`);
       setWebhooks((prev) => prev.filter((w) => w.id !== id));
@@ -556,6 +572,7 @@ function WebhooksSection() {
       )}
 
       {showModal && <NewWebhookModal onClose={() => setShowModal(false)} onCreate={handleCreate} />}
+      {confirmDialog}
     </div>
   );
 }

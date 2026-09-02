@@ -32,6 +32,7 @@ from app.api.routes.batch import router as batch_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.corrections import router as corrections_router
 from app.api.routes.credentials import router as credentials_router
+from app.api.routes.trash import router as trash_router
 from app.api.routes.drive import router as drive_router
 from app.api.routes.mcp_accounting import router as mcp_accounting_router
 from app.api.routes.mcp_email import router as mcp_email_router
@@ -165,6 +166,7 @@ app.include_router(admin_router, prefix=V1)
 app.include_router(studio_router, prefix=V1)
 app.include_router(actions_router, prefix=f"{V1}/actions", tags=["Actions"])
 app.include_router(credentials_router, prefix=V1)
+app.include_router(trash_router, prefix=V1)
 
 # MCP proxies — internal service boundary, NOT under /api/v1: authenticated
 # by the forwarded external-service bearer token (see registry.py), not our

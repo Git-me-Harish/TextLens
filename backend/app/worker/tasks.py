@@ -362,7 +362,27 @@ async def _run_agent(
     log.info("agent.started")
 
     try:
+        # Cancellation checkpoint — deliberately the last thing before the LLM
+        # call. A run cancelled while queued behind other work reaches this
+        # point having spent nothing, and skipping here is what makes "cancel"
+        # actually save tokens rather than just relabelling the row.
+        async with AsyncSessionLocal() as db:
+            pre = await db.get(AgentRun, run_id)
+            if pre and pre.status == AgentStatus.cancelled:
+                log.info("agent.cancelled_before_llm_call")
+                return {"run_id": run_id, "status": "cancelled"}
+
         result = await run_agent(domain, pipeline_type, extracted_text, instructions)
+
+        # The user may have cancelled while the request was in flight. That
+        # call is already paid for and can't be clawed back, but the result
+        # must not overwrite the cancelled state and resurrect the run.
+        async with AsyncSessionLocal() as db:
+            post = await db.get(AgentRun, run_id)
+            if post and post.status == AgentStatus.cancelled:
+                log.info("agent.cancelled_during_llm_call", discarded_result=True)
+                return {"run_id": run_id, "status": "cancelled"}
+
         final_status = (
             AgentStatus.failed if result.get("error") else AgentStatus.completed
         )
@@ -874,3 +894,32 @@ async def _do_webhook_retry(
         "success": success,
         "status": status_code,
     }
+
+
+# Task: Trash retention sweep
+@celery_app.task(name="app.worker.tasks.purge_expired_trash", bind=True)
+def purge_expired_trash(self):
+    """
+    Permanently remove Trash items past the retention window.
+
+    This is the only scheduled job that deletes user content, so it is
+    deliberately narrow: it touches nothing whose deleted_at is NULL, and the
+    cutoff comes from trash_service.RETENTION_DAYS rather than being repeated
+    here. Object storage is only cleaned up after the DB commit succeeds — a
+    crash can leave an orphaned object, which is recoverable waste, whereas
+    the reverse order could delete a file still referenced by a live row.
+    """
+    return _run_async(_purge_expired_trash())
+
+
+async def _purge_expired_trash() -> dict:
+    from app.db.database import AsyncSessionLocal
+    from app.services import trash_service
+
+    log = logger.bind(task="purge_expired_trash")
+    async with AsyncSessionLocal() as db:
+        removed = await trash_service.purge_expired(db)
+
+    if removed:
+        log.info("trash.retention_sweep", removed=removed)
+    return {"removed": removed}

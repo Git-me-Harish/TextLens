@@ -2,8 +2,9 @@ import { useState, useEffect } from "react";
 import { Clock, Plus, Trash2, Play, Pause, Calendar, HardDrive, Cpu } from "lucide-react";
 import { formatDistanceToNow, format } from "date-fns";
 import toast from "react-hot-toast";
+import { useConfirm } from "../lib/useConfirm";
 import api, { errMsg } from "../lib/api";
-import { Spinner } from "../components/ui";
+import { Spinner, Select } from "../components/ui";
 
 const DOMAIN_LABELS = {
   finance: "Finance", healthcare: "Healthcare", legal: "Legal",
@@ -68,24 +69,39 @@ function CreateScheduleModal({ onClose, onCreate, catalog }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
             <div>
               <label className="form-label">Domain</label>
-              <select className="form-input" value={form.domain} onChange={e => { set("domain", e.target.value); set("pipeline_type", ""); }} style={{ width: "100%" }}>
-                {Object.entries(DOMAIN_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-              </select>
+              <Select
+                style={{ width: "100%", display: "block" }}
+                aria-label="Domain"
+                value={form.domain}
+                onChange={e => { set("domain", e.target.value); set("pipeline_type", ""); }}
+                options={Object.entries(DOMAIN_LABELS).map(([value, label]) => ({ value, label }))}
+              />
             </div>
             <div>
               <label className="form-label">Pipeline</label>
-              <select className="form-input" value={form.pipeline_type} onChange={e => set("pipeline_type", e.target.value)} style={{ width: "100%" }}>
-                {domainPipelines.map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-              </select>
+              <Select
+                style={{ width: "100%", display: "block" }}
+                aria-label="Pipeline"
+                placeholder="Select pipeline…"
+                value={form.pipeline_type}
+                onChange={e => set("pipeline_type", e.target.value)}
+                options={domainPipelines.map(([value, v]) => ({ value, label: v.label }))}
+              />
             </div>
           </div>
 
           <div>
             <label className="form-label">Schedule</label>
-            <select className="form-input" value={form.cron_expr} onChange={e => set("cron_expr", e.target.value)} style={{ width: "100%" }}>
-              {presets.map(p => <option key={p.key} value={p.key}>{p.label} ({p.cron})</option>)}
-              <option value="custom">Custom cron expression…</option>
-            </select>
+            <Select
+              style={{ width: "100%", display: "block" }}
+              aria-label="Schedule"
+              value={form.cron_expr}
+              onChange={e => set("cron_expr", e.target.value)}
+              options={[
+                ...presets.map(pr => ({ value: pr.key, label: `${pr.label} (${pr.cron})` })),
+                { value: "custom", label: "Custom cron expression…" },
+              ]}
+            />
             {form.cron_expr === "custom" && (
               <input className="form-input" placeholder="e.g. 0 9 * * 1" style={{ width: "100%", marginTop: 6, fontFamily: "monospace" }}
                 onChange={e => set("cron_expr", e.target.value)} />
@@ -116,6 +132,7 @@ function CreateScheduleModal({ onClose, onCreate, catalog }) {
 }
 
 export default function SchedulesPage() {
+  const { confirm, confirmDialog } = useConfirm();
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -141,7 +158,15 @@ export default function SchedulesPage() {
     finally { setToggling(null); }
   };
 
-  const remove = async (id) => {
+  const remove = async (id, name) => {
+    // Schedules are configuration, not content — they are NOT in Trash, so
+    // this really is irreversible and says so.
+    if (!await confirm({
+      title: "Delete this schedule?",
+      message: `${name || "This schedule"} will be deleted permanently and stop running. This cannot be undone.`,
+      confirmLabel: "Delete permanently",
+      tone: "danger",
+    })) return;
     setDeleting(id);
     try {
       await api.delete(`/schedules/${id}`);
@@ -221,7 +246,7 @@ export default function SchedulesPage() {
                   {toggling === s.id ? <Spinner size={12} /> : s.is_active ? <Pause size={13} /> : <Play size={13} />}
                   {s.is_active ? "Pause" : "Resume"}
                 </button>
-                <button onClick={() => remove(s.id)} disabled={deleting === s.id} title="Delete"
+                <button onClick={() => remove(s.id, s.name)} disabled={deleting === s.id} title="Delete"
                   className="btn btn-outline btn-sm" style={{ color: "var(--danger)", borderColor: "var(--danger)" }}>
                   {deleting === s.id ? <Spinner size={12} /> : <Trash2 size={13} />}
                 </button>
@@ -238,6 +263,7 @@ export default function SchedulesPage() {
           catalog={catalog}
         />
       )}
+      {confirmDialog}
     </div>
   );
 }

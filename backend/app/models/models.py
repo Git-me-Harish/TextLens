@@ -61,6 +61,11 @@ class AgentStatus(str, enum.Enum):
     running   = "running"
     completed = "completed"
     failed    = "failed"
+    # Set by the user via POST /agents/{id}/cancel. The worker checks for it
+    # immediately before the LLM call, so cancelling a run still sitting in
+    # the queue skips the call entirely — see worker/tasks.py::_run_agent.
+    # Must stay in sync with the Postgres enum (migration 022).
+    cancelled = "cancelled"
 
 
 class AgentDomain(str, enum.Enum):
@@ -137,6 +142,10 @@ class OCRJob(Base):
     # batch linkage — null for standalone jobs
     batch_item_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("batch_items.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # NULL = live, set = in Trash. See migration 021 — DELETE marks this
+    # instead of removing the row, and object storage is left intact until
+    # the purge, so a restore gets a row whose files still exist.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="jobs")
@@ -154,6 +163,11 @@ class AgentRun(Base):
     pipeline_type: Mapped[str] = mapped_column(String(100))
     status: Mapped[AgentStatus] = mapped_column(SAEnum(AgentStatus), default=AgentStatus.pending)
     input_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What the user typed in the Instructions box. Genuinely shapes the
+    # model's output (see agent_service.py::run_agent) — persisted so a run
+    # can be understood after the fact instead of the text vanishing the
+    # moment it was sent to Claude. See migration 023.
+    user_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     structured_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[int | None] = mapped_column(Integer, nullable=True)   # 0-100
@@ -163,6 +177,10 @@ class AgentRun(Base):
     # API key used — null if from UI
     api_key_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # NULL = live, set = in Trash. See migration 021 — DELETE marks this
+    # instead of removing the row, and object storage is left intact until
+    # the purge, so a restore gets a row whose files still exist.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="agent_runs")
@@ -187,6 +205,10 @@ class BatchJob(Base):
     failed_files: Mapped[int] = mapped_column(Integer, default=0)
     user_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # NULL = live, set = in Trash. See migration 021 — DELETE marks this
+    # instead of removing the row, and object storage is left intact until
+    # the purge, so a restore gets a row whose files still exist.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="batch_jobs")
@@ -380,6 +402,10 @@ class ChatSession(Base):
     messages: Mapped[list] = mapped_column(JSON, default=list)
     suggested_questions: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # NULL = live, set = in Trash. See migration 021 — DELETE marks this
+    # instead of removing the row, and object storage is left intact until
+    # the purge, so a restore gets a row whose files still exist.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped["User"] = relationship("User")

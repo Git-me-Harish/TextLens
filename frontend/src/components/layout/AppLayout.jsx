@@ -6,6 +6,7 @@ import {
   Layers, Key, Webhook, ShieldCheck, Zap, Upload,
   HeartPulse, Scale, Truck, GraduationCap, Building2, FileSearch,
   TrendingUp, MessageSquare, CalendarClock, Briefcase, Wand2,
+  Trash2,
 } from "lucide-react";
 import { useAuth } from "../../lib/AuthContext";
 import { useAgent } from "../../lib/AgentContext";
@@ -62,6 +63,7 @@ const NAV = [
     label: "Data",
     items: [
       { label: "Extraction History",icon: History,      to: "/history" },
+      { label: "Trash",             icon: Trash2,       to: "/trash" },
     ],
   },
   {

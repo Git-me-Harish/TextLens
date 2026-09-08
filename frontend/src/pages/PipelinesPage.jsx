@@ -417,7 +417,7 @@ export default function PipelinesPage() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { "application/pdf": [], "image/jpeg": [], "image/png": [], "image/webp": [], "image/tiff": [] },
+    accept: { "application/pdf": [], "image/jpeg": [], "image/png": [], "image/webp": [], "image/tiff": [], "image/heic": [".heic"], "image/heif": [".heif"] },
     maxFiles: 1,
   });
 
@@ -521,7 +521,7 @@ export default function PipelinesPage() {
               <>
                 <div className="dropzone-icon"><Upload size={28} /></div>
                 <div className="dropzone-title">Drop your file here or click to browse</div>
-                <div className="dropzone-sub">PDF, JPG, PNG, TIFF — max 50MB</div>
+                <div className="dropzone-sub">PDF, JPG, PNG, TIFF, HEIC — max 50MB</div>
               </>
             )}
           </div>

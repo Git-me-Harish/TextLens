@@ -280,7 +280,7 @@ export default function BatchPage() {
     onDrop: (accepted) => setFiles((prev) => [...prev, ...accepted]),
     accept: {
       "application/pdf": [], "image/jpeg": [], "image/png": [],
-      "image/webp": [], "image/tiff": [], "application/zip": [],
+      "image/webp": [], "image/tiff": [], "image/heic": [".heic"], "image/heif": [".heif"], "application/zip": [],
     },
     multiple: true,
   });
@@ -383,7 +383,7 @@ export default function BatchPage() {
             <>
               <div className="dropzone-icon"><Upload size={24} /></div>
               <div className="dropzone-title">Drop files or a ZIP archive</div>
-              <div className="dropzone-sub">PDF, JPG, PNG, WEBP, TIFF — or a ZIP of any combination — max 50 files</div>
+              <div className="dropzone-sub">PDF, JPG, PNG, WEBP, TIFF, HEIC — or a ZIP of any combination — max 50 files</div>
             </>
           )}
         </div>

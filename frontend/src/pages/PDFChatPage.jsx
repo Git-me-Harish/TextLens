@@ -5,6 +5,27 @@ import {
   Send, FileText, RotateCcw, Bot, User as UserIcon,
   Copy, Check, History, Download, Zap, Brain, MessageSquarePlus,
 } from "lucide-react";
+import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
+import jsLang from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import tsLang from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import jsxLang from "react-syntax-highlighter/dist/esm/languages/prism/jsx";
+import tsxLang from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
+import pyLang from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import javaLang from "react-syntax-highlighter/dist/esm/languages/prism/java";
+import cLang from "react-syntax-highlighter/dist/esm/languages/prism/c";
+import cppLang from "react-syntax-highlighter/dist/esm/languages/prism/cpp";
+import csharpLang from "react-syntax-highlighter/dist/esm/languages/prism/csharp";
+import goLang from "react-syntax-highlighter/dist/esm/languages/prism/go";
+import rustLang from "react-syntax-highlighter/dist/esm/languages/prism/rust";
+import rubyLang from "react-syntax-highlighter/dist/esm/languages/prism/ruby";
+import phpLang from "react-syntax-highlighter/dist/esm/languages/prism/php";
+import sqlLang from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import bashLang from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import jsonLang from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import yamlLang from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+import htmlLang from "react-syntax-highlighter/dist/esm/languages/prism/markup";
+import cssLang from "react-syntax-highlighter/dist/esm/languages/prism/css";
+import oneLight from "react-syntax-highlighter/dist/esm/styles/prism/one-light";
 import { formatDistanceToNow } from "date-fns";
 import toast from "react-hot-toast";
 import api, { errMsg } from "../lib/api";
@@ -13,6 +34,128 @@ import { waitForJobSSE } from "../hooks/useSSE";
 import { usePersistedState } from "../lib/usePersistedState";
 
 const MAX_QUESTION_LENGTH = 2000; // mirrors AskRequest on the backend
+
+// Registering only the languages actually likely to show up in document
+// chat (vs. the full Prism catalog) keeps this out of the main bundle —
+// react-syntax-highlighter's PrismLight build is opt-in per language for
+// exactly this reason.
+SyntaxHighlighter.registerLanguage("javascript", jsLang);
+SyntaxHighlighter.registerLanguage("typescript", tsLang);
+SyntaxHighlighter.registerLanguage("jsx", jsxLang);
+SyntaxHighlighter.registerLanguage("tsx", tsxLang);
+SyntaxHighlighter.registerLanguage("python", pyLang);
+SyntaxHighlighter.registerLanguage("java", javaLang);
+SyntaxHighlighter.registerLanguage("c", cLang);
+SyntaxHighlighter.registerLanguage("cpp", cppLang);
+SyntaxHighlighter.registerLanguage("csharp", csharpLang);
+SyntaxHighlighter.registerLanguage("go", goLang);
+SyntaxHighlighter.registerLanguage("rust", rustLang);
+SyntaxHighlighter.registerLanguage("ruby", rubyLang);
+SyntaxHighlighter.registerLanguage("php", phpLang);
+SyntaxHighlighter.registerLanguage("sql", sqlLang);
+SyntaxHighlighter.registerLanguage("bash", bashLang);
+SyntaxHighlighter.registerLanguage("json", jsonLang);
+SyntaxHighlighter.registerLanguage("yaml", yamlLang);
+SyntaxHighlighter.registerLanguage("markup", htmlLang);
+SyntaxHighlighter.registerLanguage("css", cssLang);
+
+// Fence tags the LLM might actually write, mapped to (a) the Prism grammar
+// name registered above and (b) a short display label + accent color for
+// the header bar — a lightweight stand-in for a per-language logo that
+// doesn't require pulling in a whole brand-icon package. Anything not
+// listed here still renders correctly (falls back to a plain-text grammar
+// and a generic gray badge with whatever tag the model used), so an
+// unfamiliar or missing language tag degrades gracefully instead of
+// breaking the block.
+const LANG_META = {
+  js:         { grammar: "javascript", label: "JavaScript", color: "#f0db4f", fg: "#3b3300" },
+  javascript: { grammar: "javascript", label: "JavaScript", color: "#f0db4f", fg: "#3b3300" },
+  ts:         { grammar: "typescript", label: "TypeScript", color: "#3178c6", fg: "#fff" },
+  typescript: { grammar: "typescript", label: "TypeScript", color: "#3178c6", fg: "#fff" },
+  jsx:        { grammar: "jsx",        label: "JSX",        color: "#61dafb", fg: "#003847" },
+  tsx:        { grammar: "tsx",        label: "TSX",        color: "#61dafb", fg: "#003847" },
+  py:         { grammar: "python",     label: "Python",     color: "#3776ab", fg: "#fff" },
+  python:     { grammar: "python",     label: "Python",     color: "#3776ab", fg: "#fff" },
+  java:       { grammar: "java",       label: "Java",       color: "#ea2d2e", fg: "#fff" },
+  c:          { grammar: "c",          label: "C",          color: "#5c6bc0", fg: "#fff" },
+  cpp:        { grammar: "cpp",        label: "C++",        color: "#00599c", fg: "#fff" },
+  "c++":      { grammar: "cpp",        label: "C++",        color: "#00599c", fg: "#fff" },
+  cs:         { grammar: "csharp",     label: "C#",         color: "#68217a", fg: "#fff" },
+  csharp:     { grammar: "csharp",     label: "C#",         color: "#68217a", fg: "#fff" },
+  go:         { grammar: "go",         label: "Go",         color: "#00add8", fg: "#003847" },
+  golang:     { grammar: "go",         label: "Go",         color: "#00add8", fg: "#003847" },
+  rust:       { grammar: "rust",       label: "Rust",       color: "#dea584", fg: "#3b2a1e" },
+  rs:         { grammar: "rust",       label: "Rust",       color: "#dea584", fg: "#3b2a1e" },
+  ruby:       { grammar: "ruby",       label: "Ruby",       color: "#cc342d", fg: "#fff" },
+  rb:         { grammar: "ruby",       label: "Ruby",       color: "#cc342d", fg: "#fff" },
+  php:        { grammar: "php",        label: "PHP",        color: "#777bb4", fg: "#fff" },
+  sql:        { grammar: "sql",        label: "SQL",        color: "#e38c00", fg: "#fff" },
+  bash:       { grammar: "bash",       label: "Shell",      color: "#4eaa25", fg: "#fff" },
+  sh:         { grammar: "bash",       label: "Shell",      color: "#4eaa25", fg: "#fff" },
+  shell:      { grammar: "bash",       label: "Shell",      color: "#4eaa25", fg: "#fff" },
+  zsh:        { grammar: "bash",       label: "Shell",      color: "#4eaa25", fg: "#fff" },
+  json:       { grammar: "json",       label: "JSON",       color: "#292929", fg: "#fff" },
+  yaml:       { grammar: "yaml",       label: "YAML",       color: "#cb171e", fg: "#fff" },
+  yml:        { grammar: "yaml",       label: "YAML",       color: "#cb171e", fg: "#fff" },
+  html:       { grammar: "markup",     label: "HTML",       color: "#e34c26", fg: "#fff" },
+  xml:        { grammar: "markup",     label: "XML",        color: "#e34c26", fg: "#fff" },
+  css:        { grammar: "css",        label: "CSS",        color: "#264de4", fg: "#fff" },
+};
+const DEFAULT_LANG_META = { grammar: "text", label: null, color: "#94a3b8", fg: "#fff" };
+
+/*  Fenced code block — real syntax highlighting + a language header,
+    independent per block (a reply can mix several small ones or one big
+    one; each fence is parsed and rendered on its own). */
+function CodeBlock({ lang, code }) {
+  const [copied, setCopied] = useState(false);
+  const tag = (lang || "").toLowerCase().trim();
+  const meta = LANG_META[tag] || DEFAULT_LANG_META;
+  const displayLabel = meta.label || (tag ? tag : "Code");
+
+  const copy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <div style={{ margin: "0.5rem 0", borderRadius: 8, overflow: "hidden", border: "1px solid var(--border)" }}>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "0.35rem 0.6rem",
+        background: "var(--paper-2,#f5f7f9)",
+        borderBottom: "1px solid var(--border)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            fontSize: "0.62rem", fontWeight: 800, letterSpacing: "0.02em",
+            padding: "1px 6px", borderRadius: 4,
+            background: meta.color, color: meta.fg,
+          }}>
+            {displayLabel.slice(0, 4).toUpperCase()}
+          </span>
+          <span style={{ fontSize: "0.72rem", fontWeight: 600, color: "var(--ink-muted)" }}>{displayLabel}</span>
+        </div>
+        <button
+          onClick={copy}
+          title="Copy code"
+          style={{ background: "none", border: "none", cursor: "pointer", padding: 3, color: copied ? "var(--accent)" : "var(--ink-muted)", display: "flex", alignItems: "center", gap: 4, fontSize: "0.68rem" }}
+        >
+          {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <SyntaxHighlighter
+        language={meta.grammar}
+        style={oneLight}
+        customStyle={{ margin: 0, padding: "0.75rem 1rem", fontSize: "0.8rem", background: "#fafafa" }}
+        codeTagProps={{ style: { fontFamily: "ui-monospace, 'SF Mono', Menlo, monospace" } }}
+      >
+        {code}
+      </SyntaxHighlighter>
+    </div>
+  );
+}
 
 /*  Inline markdown renderer (unchanged from V1)  */
 function InlineText({ text }) {
@@ -36,9 +179,10 @@ function MarkdownBlock({ content }) {
   while (i < lines.length) {
     const line = lines[i];
     if (line.startsWith("```")) {
+      const fenceLang = line.slice(3).trim();
       const codeLines = []; i++;
       while (i < lines.length && !lines[i].startsWith("```")) { codeLines.push(lines[i]); i++; }
-      elements.push(<pre key={i} style={{ background: "var(--paper-2,#f5f7f9)", borderRadius: 6, padding: "0.75rem 1rem", fontSize: "0.8rem", fontFamily: "monospace", overflowX: "auto", margin: "0.5rem 0", border: "1px solid var(--border)" }}><code>{codeLines.join("\n")}</code></pre>);
+      elements.push(<CodeBlock key={i} lang={fenceLang} code={codeLines.join("\n")} />);
       i++; continue;
     }
     if (line.startsWith("|") && lines[i + 1]?.match(/^\|[-| :]+\|/)) {
@@ -235,7 +379,11 @@ export default function PDFChatPage() {
     setSelectingId(jobId);
     try {
       const { data: sess } = await api.post("/chat/sessions", { job_id: jobId });
-      setSession({ id: sess.id, title: sess.title, job_id: jobId, suggested_questions: sess.suggested_questions, filename });
+      // POST /chat/sessions responds with StartResponse: {session_id, title,
+      // suggested_questions} — not {id, ...}. Reading sess.id left session.id
+      // undefined for every newly-started chat, so the first message always
+      // posted to /chat/sessions/undefined/ask and 500'd — verified live.
+      setSession({ id: sess.session_id, title: sess.title, job_id: jobId, suggested_questions: sess.suggested_questions, filename });
       setMessages([{ role: "system", content: `Document loaded: ${filename}` }]);
 
       // Put the session in the URL. The page already knows how to resume from
@@ -244,8 +392,8 @@ export default function PDFChatPage() {
       // had the whole transcript. Writing it here makes reload survivable and
       // the conversation linkable, with replace:true so it doesn't add a
       // history entry the back button would trip over.
-      loadedSessionRef.current = sess.id;
-      setSearchParams({ session: sess.id }, { replace: true });
+      loadedSessionRef.current = sess.session_id;
+      setSearchParams({ session: sess.session_id }, { replace: true });
 
       setTimeout(() => inputRef.current?.focus(), 100);
     } catch (err) {

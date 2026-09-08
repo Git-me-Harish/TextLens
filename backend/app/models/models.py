@@ -401,6 +401,7 @@ class ChatSession(Base):
     title: Mapped[str] = mapped_column(String(512), default="Chat session")
     messages: Mapped[list] = mapped_column(JSON, default=list)
     suggested_questions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    pinned: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     # NULL = live, set = in Trash. See migration 021 — DELETE marks this
     # instead of removing the row, and object storage is left intact until

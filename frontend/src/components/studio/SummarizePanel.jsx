@@ -120,12 +120,37 @@ export default function SummarizePanel({ action }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const [exporting, setExporting] = useState(null); // "docx" | "pdf" | null
+
+  const summaryFilename = `summary_${currentStyle.label.toLowerCase().replace(" ", "_")}`;
+
   const download = () => {
     const blob = new Blob([summaryText], { type: "text/plain" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `summary_${currentStyle.label.toLowerCase().replace(" ", "_")}.txt`;
+    a.download = `${summaryFilename}.txt`;
     a.click();
+  };
+
+  const downloadAs = async (format) => {
+    setExporting(format);
+    try {
+      const res = await api.post(
+        `/export/text/${format}`,
+        { text: summaryText, filename: summaryFilename },
+        { responseType: "blob" },
+      );
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${summaryFilename}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error(errMsg(err, "Export failed"));
+    } finally {
+      setExporting(null);
+    }
   };
 
   if (job && summaryText) {
@@ -145,7 +170,13 @@ export default function SummarizePanel({ action }) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={reset} className="btn btn-ghost btn-sm"><RotateCcw size={13} /> New document</button>
             <button onClick={copy} className="btn btn-ghost btn-sm">{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? "Copied" : "Copy"}</button>
-            <button onClick={download} className="btn btn-outline btn-sm"><Download size={13} /> Download</button>
+            <button onClick={download} className="btn btn-outline btn-sm"><Download size={13} /> .txt</button>
+            <button onClick={() => downloadAs("docx")} disabled={exporting === "docx"} className="btn btn-outline btn-sm">
+              {exporting === "docx" ? <Spinner size={13} /> : <Download size={13} />} .docx
+            </button>
+            <button onClick={() => downloadAs("pdf")} disabled={exporting === "pdf"} className="btn btn-outline btn-sm">
+              {exporting === "pdf" ? <Spinner size={13} /> : <Download size={13} />} .pdf
+            </button>
             <button onClick={() => navigate("/pipelines", { state: { job_id: job.id } })} className="btn btn-primary btn-sm">
               <Sparkles size={13} /> Deeper analysis
             </button>

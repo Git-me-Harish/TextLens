@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -7,8 +8,42 @@ from app.api.deps import get_current_user
 from app.db.database import get_db
 from app.models.models import User, AgentRun
 from app.services.export_service import to_csv, to_excel
+from app.services.ocr_service import text_to_docx_bytes, text_to_pdf_bytes
 
 router = APIRouter(prefix="/export", tags=["export"])
+
+
+class TextExportRequest(BaseModel):
+    text: str = Field(min_length=1)
+    filename: str = Field(default="export", max_length=200)
+
+
+# Plain-text export (Summary panel's "Word"/"PDF" download, and anywhere
+# else that only has result text in the browser, no server-side job file).
+# Not job-scoped or auth-checked against a specific resource — the text is
+# whatever the authenticated caller already has in front of them, so this
+# just converts it, the same trust level as the client-side .txt download
+# it sits next to.
+@router.post("/text/docx")
+async def export_text_docx(body: TextExportRequest, user: User = Depends(get_current_user)):
+    docx_bytes = text_to_docx_bytes(body.text)
+    filename = f"{body.filename}.docx"
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@router.post("/text/pdf")
+async def export_text_pdf(body: TextExportRequest, user: User = Depends(get_current_user)):
+    pdf_bytes = text_to_pdf_bytes(body.text)
+    filename = f"{body.filename}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @router.get("/agent/{run_id}/csv")

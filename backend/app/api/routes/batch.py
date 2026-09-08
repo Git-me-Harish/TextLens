@@ -34,8 +34,9 @@ from app.services.agent_service import get_pipeline_catalog
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/batch", tags=["batch"])
 
-ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"}
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp", ".heic", ".heif"}
 MAX_FILES_PER_BATCH = 50
+MAX_BATCH_UNCOMPRESSED_BYTES = settings.MAX_FILE_SIZE_MB * 5 * 1024 * 1024
 
 
 def _validate_pipeline(domain: str, pipeline_type: str) -> None:
@@ -57,30 +58,47 @@ def _extract_files_from_upload(
     """
     saved: list[tuple[str, str]] = []
 
-    for upload in files:
-        content = upload.file.read()
-        ext = Path(upload.filename or "file").suffix.lower()
+    try:
+        for upload in files:
+            content = upload.file.read()
+            if len(content) > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File '{upload.filename}' exceeds {settings.MAX_FILE_SIZE_MB} MB limit.",
+                )
+            ext = Path(upload.filename or "file").suffix.lower()
 
-        if ext == ".zip":
-            # Expand ZIP — process each file inside
-            tmp_zip = upload_dir / f"{uuid.uuid4()}.zip"
-            tmp_zip.write_bytes(content)
-            try:
-                with zipfile.ZipFile(tmp_zip, "r") as zf:
-                    for member in zf.namelist():
-                        member_ext = Path(member).suffix.lower()
-                        if member_ext not in ALLOWED_EXTENSIONS:
-                            continue
-                        member_bytes = zf.read(member)
-                        out_path = upload_dir / f"{uuid.uuid4()}{member_ext}"
-                        out_path.write_bytes(member_bytes)
-                        saved.append((str(out_path), Path(member).name))
-            finally:
-                tmp_zip.unlink(missing_ok=True)
-        elif ext in ALLOWED_EXTENSIONS:
-            out_path = upload_dir / f"{uuid.uuid4()}{ext}"
-            out_path.write_bytes(content)
-            saved.append((str(out_path), upload.filename or "file"))
+            if ext == ".zip":
+                # Expand ZIP — process each file inside
+                tmp_zip = upload_dir / f"{uuid.uuid4()}.zip"
+                tmp_zip.write_bytes(content)
+                try:
+                    with zipfile.ZipFile(tmp_zip, "r") as zf:
+                        extracted_bytes = 0
+                        for member in zf.namelist():
+                            member_ext = Path(member).suffix.lower()
+                            if member_ext not in ALLOWED_EXTENSIONS:
+                                continue
+                            extracted_bytes += zf.getinfo(member).file_size
+                            if extracted_bytes > MAX_BATCH_UNCOMPRESSED_BYTES:
+                                raise HTTPException(
+                                    status_code=413,
+                                    detail="ZIP contents exceed the batch extraction limit.",
+                                )
+                            member_bytes = zf.read(member)
+                            out_path = upload_dir / f"{uuid.uuid4()}{member_ext}"
+                            out_path.write_bytes(member_bytes)
+                            saved.append((str(out_path), Path(member).name))
+                finally:
+                    tmp_zip.unlink(missing_ok=True)
+            elif ext in ALLOWED_EXTENSIONS:
+                out_path = upload_dir / f"{uuid.uuid4()}{ext}"
+                out_path.write_bytes(content)
+                saved.append((str(out_path), upload.filename or "file"))
+    except Exception:
+        for path, _ in saved:
+            Path(path).unlink(missing_ok=True)
+        raise
 
     return saved
 

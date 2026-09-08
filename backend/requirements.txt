@@ -52,12 +52,20 @@ python-dotenv
 PyMuPDF
 pytesseract
 Pillow
+pillow-heif   # HEIC/HEIF support (iPhone photos) — Pillow can't decode it natively
 PyPDF2
 # Powers ocr_service.py's preprocessing pipeline (deskew, denoise, adaptive
 # threshold) — without this, HAS_CV2 is False and every document silently
 # falls back to the much weaker PIL-only path with no warning anywhere.
 # -headless: no GUI bindings needed in a server/container environment.
 opencv-python-headless
+
+# PP-StructureV3 — table/formula/handwriting-aware document parsing, the
+# primary scanned-page extraction engine (see ocr_service.py). The inference
+# engine itself (paddlepaddle) is installed separately in the Dockerfile from
+# Paddle's own package index, not PyPI. doc-parser is the dependency group
+# PP-StructureV3 needs (table/formula/seal recognition, layout detection).
+paddleocr[doc-parser]
 
 # Document export 
 python-docx

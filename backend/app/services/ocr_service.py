@@ -18,7 +18,12 @@ Image preprocessing chain (improves accuracy significantly):
 import math
 import os
 import re
+import tempfile
 import time
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 try:
     import fitz  # PyMuPDF
@@ -49,12 +54,45 @@ except ImportError:
     HAS_PIL = False
 
 try:
+    # Pillow has no built-in HEIC/HEIF decoder (Apple's format is patent-
+    # encumbered, unlike JPEG/PNG). Registering this plugin makes every
+    # existing Image.open() call in this file handle .heic/.heif
+    # transparently — iPhone/Android photos, the single most common "why
+    # won't it upload" format this app was missing — with no other code
+    # path needing to know the format exists.
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+    HAS_HEIF = True
+except ImportError:
+    HAS_HEIF = False
+
+try:
     import cv2
     import numpy as np
 
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
+
+try:
+    # PP-StructureV3 — table/formula/handwriting-aware document parsing.
+    # Deliberately import-only here; the actual ~1.8GB model weights and the
+    # pipeline object itself are loaded lazily by _get_paddle_pipeline()
+    # below, not at module import time.
+    #
+    # Only ever installed into the Linux Docker image (see Dockerfile) —
+    # PaddlePaddle's native CPU inference engine was verified to segfault
+    # under native Windows. This import simply fails on a Windows dev venv
+    # where the package was never installed, HAS_PADDLE lands False, and
+    # every call below falls back to Tesseract — the same graceful
+    # degradation every other optional dependency in this file already
+    # follows, not a Windows-specific special case.
+    from paddleocr import PPStructureV3
+
+    HAS_PADDLE = True
+except ImportError:
+    HAS_PADDLE = False
 
 try:
     from unidecode import unidecode
@@ -93,10 +131,21 @@ try:
     from app.core.config import settings
 
     TESS_LANG = settings.TESSERACT_LANGUAGES
+    _STRUCTURED_OCR_SETTING = settings.ENABLE_STRUCTURED_OCR
 except Exception:
     # ocr_service.py is also exercised by scripts/tests that don't load full
     # app settings — fall back to English-only rather than failing to import.
     TESS_LANG = "eng"
+    _STRUCTURED_OCR_SETTING = False
+
+# HAS_PADDLE (above) reflects only whether the package imports — true on
+# every Linux Docker image, regardless of the host's available RAM.
+# PADDLE_ENABLED is the actual usage gate: package present AND the operator
+# opted in via ENABLE_STRUCTURED_OCR. Every call site below checks this, not
+# HAS_PADDLE directly, so the default (flag off) is Tesseract-only for
+# everyone who pulls this repo — no memory risk, no setup — and the heavier
+# engine only ever runs for someone who explicitly turned it on.
+PADDLE_ENABLED = HAS_PADDLE and _STRUCTURED_OCR_SETTING
 
 
 def _missing_tesseract_languages() -> list[str]:
@@ -122,6 +171,9 @@ def check_dependencies() -> dict:
         "PyMuPDF": HAS_FITZ,
         "Tesseract binary": TESSERACT_BINARY_OK,
         "Pillow": HAS_PIL,
+        "HEIC/HEIF support": HAS_HEIF,
+        "PaddleOCR (structured parsing) installed": HAS_PADDLE,
+        "PaddleOCR (structured parsing) enabled": PADDLE_ENABLED,
         "OpenCV": HAS_CV2,
         "python-docx": HAS_DOCX,
         "Tesseract languages configured": TESS_LANG,
@@ -142,6 +194,8 @@ def _cv2_to_pil(cv2_img):
 
 def _deskew(img_cv2):
     """Detect and correct skew angle using Hough transform."""
+    import numpy as np
+
     gray = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
     lines = cv2.HoughLinesP(
@@ -151,7 +205,15 @@ def _deskew(img_cv2):
         return img_cv2
     angles = []
     for line in lines:
-        x1, y1, x2, y2 = line[0]
+        # cv2.HoughLinesP is documented as returning shape (N, 1, 4), so each
+        # `line` is a single-row 2D array and `line[0]` is the (x1,y1,x2,y2)
+        # vector. This build (opencv 5.0.0) instead returns shape (N, 4) —
+        # `line` is already that vector, and `line[0]` is just x1, a lone
+        # numpy.int32 that can't be unpacked into four names. Reproduced
+        # directly: lines.shape came back (4, 4), not (4, 1, 4). Flattening
+        # first makes this correct under either shape rather than betting on
+        # one OpenCV version's convention.
+        x1, y1, x2, y2 = np.asarray(line).reshape(-1)[:4]
         if x2 != x1:
             angles.append(math.degrees(math.atan2(y2 - y1, x2 - x1)))
     if not angles:
@@ -251,8 +313,101 @@ def _ocr_with_confidence(img: "Image.Image", config: str, lang: str) -> tuple[st
     return full_text, mean_conf
 
 
+# PP-StructureV3 — structured document parsing
+#
+# Primary engine for scanned/image content; Tesseract stays wired in as the
+# fallback (HAS_PADDLE False, or any exception from the calls below). This is
+# the same primary-with-fallback shape extract_pdf() already uses for
+# native-text-vs-OCR — one more tier of a pattern already established in this
+# file, not new architecture.
+
+_paddle_pipeline = None  # lazy singleton — built once per worker process
+
+
+def _get_paddle_pipeline():
+    """
+    Build (or return the cached) PP-StructureV3 pipeline.
+
+    Model tier is deliberately "mobile", not the default "server" tier —
+    validated directly: the server tier's 12-model cascade needs more RAM
+    than this deployment's container budget and gets OOM-killed mid-run,
+    while the mobile detector/recognizer still explicitly documents
+    handwriting support ("supports... handwriting, vertical text, pinyin,
+    and rare characters") — this trades some cell-level table precision for
+    memory headroom, not for the underlying capability itself.
+
+    Formula recognition (LaTeX) is on — a real requirement, not every
+    document has math but the ones that do need it read correctly rather
+    than come back as garbled Unicode. Pinned to the "S" (small) tier for
+    the same reason as the det/rec/layout models above — validated directly
+    that the default "plus-L" formula model pushes a real inference run
+    (not just pipeline construction) over this deployment's memory budget
+    and takes the whole container host down with it, not just the request.
+    Seal and chart recognition are off — this app's real document types
+    (invoices, prescriptions, waybills, contracts) never carry official
+    seals or charts, and loading models for inputs that never occur only
+    spends memory and latency for nothing.
+    """
+    global _paddle_pipeline
+    if _paddle_pipeline is None:
+        from paddleocr import PPStructureV3
+
+        _paddle_pipeline = PPStructureV3(
+            lang="en",
+            device="cpu",
+            use_formula_recognition=True,
+            use_seal_recognition=False,
+            use_chart_recognition=False,
+            text_detection_model_name="PP-OCRv5_mobile_det",
+            text_recognition_model_name="PP-OCRv5_mobile_rec",
+            layout_detection_model_name="PP-DocLayout-S",
+            formula_recognition_model_name="PP-FormulaNet_plus-S",
+        )
+    return _paddle_pipeline
+
+
+def _paddle_extract(image_path: str) -> str | None:
+    """
+    Run PP-StructureV3 on a single-page image, returning Markdown (real
+    tables as Markdown/HTML, LaTeX for any formulas) or None on any failure.
+
+    Deliberately never raises — every call site treats None as "fall back
+    to Tesseract", so a Paddle-specific problem (a corrupt model cache, an
+    unsupported image mode, anything) degrades to the existing OCR path
+    instead of failing the whole extraction.
+    """
+    if not PADDLE_ENABLED:
+        return None
+    try:
+        pipeline = _get_paddle_pipeline()
+        pages_md = []
+        for res in pipeline.predict(image_path):
+            md = res.markdown.get("markdown_texts") if hasattr(res, "markdown") else None
+            if md:
+                pages_md.append(md)
+        text = "\n\n".join(pages_md).strip()
+        return text or None
+    except Exception as exc:
+        logger.warning("ocr.paddle_extract_failed", error=str(exc))
+        return None
+
+
 def ocr_image_file(image_path: str) -> tuple[str, float | None]:
-    """OCR a single image file with preprocessing. Returns (text, ocr_confidence)."""
+    """
+    OCR a single image file. Returns (text, ocr_confidence).
+
+    Tries PP-StructureV3 first — real table structure, LaTeX formulas,
+    handwriting support the Tesseract path below has none of. No 0-100
+    confidence concept applies to it (nothing comparable to Tesseract's
+    per-word confidence exists in its output), so confidence comes back
+    None on that path — reported honestly as "unknown", not invented.
+    Falls through to Tesseract on any Paddle failure or when it isn't
+    installed (native Windows dev venv — see the HAS_PADDLE import above).
+    """
+    paddle_text = _paddle_extract(image_path)
+    if paddle_text:
+        return paddle_text, None
+
     if not HAS_TESSERACT or not TESSERACT_BINARY_OK:
         raise RuntimeError(
             "Tesseract not available. Install tesseract-ocr system package."
@@ -312,21 +467,49 @@ def extract_pdf(pdf_path: str) -> tuple[str, int, float | None]:
         if len(native_text) >= MIN_CHARS_PER_PAGE:
             # Good native text
             page_texts.append(unidecode(native_text))
-        elif HAS_TESSERACT and TESSERACT_BINARY_OK:
-            # Scanned page — render and OCR
+        elif PADDLE_ENABLED or (HAS_TESSERACT and TESSERACT_BINARY_OK):
+            # Scanned page — render, then try PaddleOCR before Tesseract.
             img = _pdf_page_to_image(page)
-            processed = preprocess_image(img)
-            try:
-                ocr_text, page_conf = _ocr_with_confidence(processed, TESS_CONFIG, TESS_LANG)
-                page_texts.append(ocr_text.strip())
+
+            paddle_md = None
+            if PADDLE_ENABLED:
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        tmp_path = tmp.name
+                    img.save(tmp_path)
+                    paddle_md = _paddle_extract(tmp_path)
+                finally:
+                    if tmp_path:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+
+            if paddle_md:
+                page_texts.append(paddle_md)
                 ocr_pages += 1
-                if page_conf is not None:
-                    page_confidences.append(page_conf)
-            except Exception as e:
-                page_texts.append(f"[Page {page_num + 1} OCR failed: {e}]")
+                # No 0-100 confidence concept applies to Paddle's output —
+                # page_confidences (Tesseract-specific) stays untouched, so
+                # the aggregate below only ever averages genuine Tesseract
+                # scores rather than mixing in a number that means nothing.
+            elif HAS_TESSERACT and TESSERACT_BINARY_OK:
+                processed = preprocess_image(img)
+                try:
+                    ocr_text, page_conf = _ocr_with_confidence(processed, TESS_CONFIG, TESS_LANG)
+                    page_texts.append(ocr_text.strip())
+                    ocr_pages += 1
+                    if page_conf is not None:
+                        page_confidences.append(page_conf)
+                except Exception as e:
+                    raise RuntimeError(f"Page {page_num + 1} OCR failed: {e}") from e
+            else:
+                # Paddle ran but returned nothing usable, and there's no
+                # Tesseract to fall back to.
+                raise RuntimeError(f"Page {page_num + 1}: PaddleOCR returned no text and no fallback OCR engine is available.")
         else:
             page_texts.append(
-                native_text or f"[Page {page_num + 1}: no text, Tesseract unavailable]"
+                native_text or f"[Page {page_num + 1}: no text, no OCR engine available]"
             )
 
     doc.close()
@@ -400,6 +583,51 @@ def sections_to_word(sections: list[dict], output_path: str) -> str:
         doc.add_paragraph("")
     doc.save(output_path)
     return output_path
+
+
+def text_to_docx_bytes(text: str) -> bytes:
+    """Plain text (blank-line-separated paragraphs) -> .docx bytes, in memory."""
+    if not HAS_DOCX:
+        raise RuntimeError("python-docx not installed.")
+    import io
+
+    doc = DocxDocument()
+    for para in text.split("\n\n"):
+        para = para.strip()
+        if para:
+            doc.add_paragraph(para)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def text_to_pdf_bytes(text: str) -> bytes:
+    """Plain text (blank-line-separated paragraphs) -> .pdf bytes, in memory."""
+    import io
+
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=LETTER,
+        leftMargin=1 * inch, rightMargin=1 * inch,
+        topMargin=1 * inch, bottomMargin=1 * inch,
+    )
+    style = getSampleStyleSheet()["BodyText"]
+    story = []
+    for para in text.split("\n\n"):
+        para = para.strip()
+        if para:
+            # reportlab's Paragraph markup treats bare & < > as XML — escape
+            # them or a summary containing e.g. "A & B" silently truncates.
+            escaped = para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            story.append(Paragraph(escaped, style))
+            story.append(Spacer(1, 12))
+    doc.build(story)
+    return buf.getvalue()
 
 
 def summarize_text(text: str, ratio: float = 0.3) -> str:
@@ -549,6 +777,13 @@ def process_job(job_type: str, file_path: str, extra: dict = None) -> dict:
             result["text"] = f"Combined {page_count} image(s) into PDF"
             result["page_count"] = page_count
 
+        elif job_type == "image_to_pdf":
+            out_path = file_path.rsplit(".", 1)[0] + "_converted.pdf"
+            _, page_count = images_to_pdf([file_path], out_path)
+            result["file_path"] = out_path
+            result["text"] = "Converted image to PDF"
+            result["page_count"] = page_count
+
         else:
             raise ValueError(f"Unknown job type: {job_type}")
 
@@ -695,19 +930,34 @@ def images_to_pdf(image_paths: list[str], output_path: str) -> tuple[str, int]:
     Combine one or more images into a single PDF.
     Each image becomes one page.
     Returns (output_path, page_count).
+
+    Decodes via Pillow, not fitz.open(path) directly — verified live that
+    PyMuPDF's own image loader has no WEBP support at all (fails with
+    FileDataError even on a WEBP fitz itself never touched otherwise), and
+    HEIC only works anywhere in this app because pillow_heif patches PIL's
+    opener, not fitz's. Pillow covers every format this app already accepts
+    (JPEG/PNG/TIFF/BMP/WEBP/HEIC — see check_dependencies), so routing every
+    image through it first and only handing fitz a real PDF to assemble is
+    the one path that actually works for all of them, not just some.
     """
     if not HAS_FITZ:
         raise RuntimeError("PyMuPDF not installed.")
+    if not HAS_PIL:
+        raise RuntimeError("Pillow not installed.")
     if not image_paths:
         raise ValueError("No images provided.")
+
+    import io
 
     doc = fitz.open()
 
     for img_path in image_paths:
-        img_doc = fitz.open(img_path)  # works for JPEG, PNG, TIFF, BMP
-        rect = img_doc[0].rect
-        pdf_bytes = img_doc.convert_to_pdf()  # convert image to single-page PDF
-        img_doc.close()
+        with Image.open(img_path) as im:
+            if im.mode not in ("RGB", "L"):
+                im = im.convert("RGB")
+            buf = io.BytesIO()
+            im.save(buf, format="PDF")
+            pdf_bytes = buf.getvalue()
 
         img_pdf = fitz.open("pdf", pdf_bytes)
         doc.insert_pdf(img_pdf)

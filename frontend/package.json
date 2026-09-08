@@ -20,7 +20,8 @@
     "react-dropzone": "^14.2.3",
     "react-hook-form": "^7.52.0",
     "react-hot-toast": "^2.4.1",
-    "react-router-dom": "^6.24.0"
+    "react-router-dom": "^6.24.0",
+    "react-syntax-highlighter": "^16.1.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",

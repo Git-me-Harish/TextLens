@@ -226,6 +226,8 @@ _EXT_TO_MIME: dict[str, str] = {
     ".tif":  "image/tiff",
     ".bmp":  "image/bmp",
     ".webp": "image/webp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".csv":  "text/csv",

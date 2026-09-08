@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.api.routes.jobs import _sniff_content_type
 from app.core.config import settings
 from app.db.database import get_db
 from app.models.models import JobStatus, JobType, OCRJob, User
@@ -67,6 +68,8 @@ async def _upload_all(
                 f"File '{f.filename}' exceeds {settings.MAX_FILE_SIZE_MB} MB limit.",
             )
         ct = storage_service.content_type_for(f.filename or "upload.bin")
+        if _sniff_content_type(content) != ct:
+            raise HTTPException(400, f"File '{f.filename}' content does not match its type.")
         key = storage_service.build_upload_key(user_id, f.filename or "upload.bin")
         await storage_service.upload_bytes(content, key, ct)
         results.append((content, key, f.filename or "upload.bin"))
@@ -155,13 +158,15 @@ async def combine_images(
         "image/tiff",
         "image/webp",
         "image/bmp",
+        "image/heic",
+        "image/heif",
     }
     for f in files:
         ct = storage_service.content_type_for(f.filename or "")
         if ct not in _ALLOWED_IMAGE_TYPES:
             raise HTTPException(
                 400,
-                f"'{f.filename}' is not a supported image type (JPG, PNG, TIFF, WEBP, BMP).",
+                f"'{f.filename}' is not a supported image type (JPG, PNG, TIFF, WEBP, BMP, HEIC).",
             )
 
     uploaded = await _upload_all(files, user.id)
@@ -247,6 +252,8 @@ async def save_edited_pdf(
         raise HTTPException(400, "The edited file is empty.")
     if len(content) > _MAX_BYTES:
         raise HTTPException(413, f"File exceeds {settings.MAX_FILE_SIZE_MB} MB limit.")
+    if _sniff_content_type(content) != "application/pdf":
+        raise HTTPException(400, "The edited file is not a valid PDF.")
 
     key = storage_service.build_upload_key(user.id, original_filename)
     await storage_service.upload_bytes(content, key, "application/pdf")

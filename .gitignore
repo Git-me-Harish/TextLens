@@ -57,3 +57,4 @@ htmlcov/
 # Secrets
 *.pem
 *.key
+docker-compose.override.yml

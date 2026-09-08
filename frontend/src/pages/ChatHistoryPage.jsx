@@ -1,11 +1,11 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   MessageSquare, Search, Trash2, ExternalLink,
-  ChevronRight, FileText, Clock, X,
+  ChevronRight, FileText, Clock, X, Pencil, Pin, PinOff, Check,
 } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
+import { format } from "date-fns";
 import toast from "react-hot-toast";
 import { useConfirm } from "../lib/useConfirm";
 import api, { errMsg } from "../lib/api";
@@ -34,9 +34,9 @@ function groupByDocument(sessions) {
     }
     groups[key].sessions.push(sess);
   }
-  // Sort each group's sessions by updated_at desc
+  // Pinned first within each group, then most recently updated.
   for (const g of Object.values(groups)) {
-    g.sessions.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+    g.sessions.sort((a, b) => (b.pinned - a.pinned) || (new Date(b.updated_at) - new Date(a.updated_at)));
   }
   // Sort groups by most-recent session
   return Object.values(groups).sort((a, b) => {
@@ -47,12 +47,31 @@ function groupByDocument(sessions) {
 }
 
 /*  Session card  */
-function SessionCard({ session, onDelete, onResume }) {
-  const msgCount = Array.isArray(session.messages) ? session.messages.length : 0;
+function SessionCard({ session, onDelete, onResume, onRename, onTogglePin }) {
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(session.title || "");
+  const inputRef = useRef(null);
+
   const lastMsg  = Array.isArray(session.messages) && session.messages.length
     ? session.messages[session.messages.length - 1]
     : null;
   const preview  = lastMsg?.content?.slice(0, 90) || "No messages yet";
+
+  useEffect(() => {
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
+
+  const startEdit = (e) => {
+    e.stopPropagation();
+    setDraftTitle(session.title || "");
+    setEditing(true);
+  };
+
+  const commitEdit = () => {
+    const trimmed = draftTitle.trim();
+    setEditing(false);
+    if (trimmed && trimmed !== session.title) onRename(session.id, trimmed);
+  };
 
   return (
     <div
@@ -60,19 +79,19 @@ function SessionCard({ session, onDelete, onResume }) {
         display: "flex", alignItems: "flex-start", gap: 12,
         padding: "0.875rem 1rem",
         borderRadius: 10,
-        background: "var(--paper)",
-        border: "1px solid var(--border)",
-        cursor: "pointer",
+        background: session.pinned ? "var(--accent-light, #f0f4ff)" : "var(--paper)",
+        border: `1px solid ${session.pinned ? "var(--accent)" : "var(--border)"}`,
+        cursor: editing ? "default" : "pointer",
         transition: "border-color 0.15s, box-shadow 0.15s",
       }}
-      onClick={() => onResume(session.id)}
+      onClick={() => !editing && onResume(session.id)}
       onMouseEnter={e => {
-        e.currentTarget.style.borderColor = "var(--accent)";
-        e.currentTarget.style.boxShadow   = "0 2px 8px rgba(0,0,0,0.06)";
+        if (!session.pinned) e.currentTarget.style.borderColor = "var(--accent)";
+        e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.06)";
       }}
       onMouseLeave={e => {
-        e.currentTarget.style.borderColor = "var(--border)";
-        e.currentTarget.style.boxShadow   = "none";
+        e.currentTarget.style.borderColor = session.pinned ? "var(--accent)" : "var(--border)";
+        e.currentTarget.style.boxShadow = "none";
       }}
     >
       {/* Icon */}
@@ -87,27 +106,55 @@ function SessionCard({ session, onDelete, onResume }) {
 
       {/* Content */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--ink)", marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {session.title || "Chat session"}
-        </div>
+        {editing ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }} onClick={e => e.stopPropagation()}>
+            <input
+              ref={inputRef}
+              className="form-input"
+              value={draftTitle}
+              onChange={e => setDraftTitle(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditing(false); }}
+              style={{ fontSize: "0.85rem", padding: "0.25rem 0.5rem", flex: 1 }}
+              maxLength={512}
+            />
+            <button onClick={commitEdit} title="Save" style={{ background: "none", border: "none", cursor: "pointer", padding: 2, color: "var(--accent)" }}>
+              <Check size={14} />
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+            <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {session.title || "Chat session"}
+            </div>
+            <button
+              title="Rename"
+              onClick={startEdit}
+              style={{ background: "none", border: "none", cursor: "pointer", padding: 2, color: "var(--ink-muted)", flexShrink: 0 }}
+            >
+              <Pencil size={11} />
+            </button>
+          </div>
+        )}
         <div style={{ fontSize: "0.76rem", color: "var(--ink-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 5 }}>
           {preview}…
         </div>
         <div style={{ display: "flex", gap: 12, fontSize: "0.72rem", color: "var(--ink-muted)" }}>
           <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-            <MessageSquare size={10} /> {msgCount} message{msgCount !== 1 ? "s" : ""}
-          </span>
-          <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
             <Clock size={10} />
-            {session.updated_at
-              ? formatDistanceToNow(new Date(session.updated_at), { addSuffix: true })
-              : "—"}
+            {session.updated_at ? format(new Date(session.updated_at), "MMM d, yyyy · h:mm a") : "—"}
           </span>
         </div>
       </div>
 
       {/* Actions */}
       <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+        <button
+          title={session.pinned ? "Unpin" : "Pin to top"}
+          onClick={(e) => { e.stopPropagation(); onTogglePin(session.id, !session.pinned); }}
+          style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: session.pinned ? "var(--accent)" : "var(--ink-muted)" }}
+        >
+          {session.pinned ? <Pin size={13} fill="currentColor" /> : <PinOff size={13} />}
+        </button>
         <button
           title="Resume session"
           onClick={(e) => { e.stopPropagation(); onResume(session.id); }}
@@ -128,7 +175,7 @@ function SessionCard({ session, onDelete, onResume }) {
 }
 
 /*  Document group  */
-function DocumentGroup({ group, onDelete, onResume }) {
+function DocumentGroup({ group, onDelete, onResume, onRename, onTogglePin }) {
   const [expanded, setExpanded] = useState(true);
   const total = group.sessions.length;
 
@@ -170,6 +217,8 @@ function DocumentGroup({ group, onDelete, onResume }) {
               session={sess}
               onDelete={onDelete}
               onResume={onResume}
+              onRename={onRename}
+              onTogglePin={onTogglePin}
             />
           ))}
         </div>
@@ -224,6 +273,37 @@ export default function ChatHistoryPage() {
 
   const handleResume = (sessionId) => {
     navigate(`/tools/pdf-chat?session=${sessionId}`);
+  };
+
+  // Shared optimistic-patch shape for rename/pin — both just merge a partial
+  // update into the matching session in the cached list.
+  const patchSessionCache = (sessionId, patch) => {
+    queryClient.setQueryData(["chat-sessions"], (old) => {
+      if (!old) return old;
+      const list = Array.isArray(old) ? old : old.sessions ?? [];
+      const updated = list.map(s => s.id === sessionId ? { ...s, ...patch } : s);
+      return Array.isArray(old) ? updated : { ...old, sessions: updated };
+    });
+  };
+
+  const handleRename = async (sessionId, title) => {
+    patchSessionCache(sessionId, { title });
+    try {
+      await api.patch(`/chat/sessions/${sessionId}`, { title });
+    } catch (err) {
+      toast.error(errMsg(err, "Rename failed"));
+      queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+    }
+  };
+
+  const handleTogglePin = async (sessionId, pinned) => {
+    patchSessionCache(sessionId, { pinned });
+    try {
+      await api.patch(`/chat/sessions/${sessionId}`, { pinned });
+    } catch (err) {
+      toast.error(errMsg(err, "Could not update pin"));
+      queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+    }
   };
 
   const totalSessions = sessions.length;
@@ -311,6 +391,8 @@ export default function ChatHistoryPage() {
           group={group}
           onDelete={handleDelete}
           onResume={handleResume}
+          onRename={handleRename}
+          onTogglePin={handleTogglePin}
         />
       ))}
       {confirmDialog}

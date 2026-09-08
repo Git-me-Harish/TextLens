@@ -76,7 +76,10 @@ def process_ocr_job(self, job_id: str, extra_data: dict | None = None) -> dict:
       7. Send email notification (if RESEND_API_KEY is set)
       8. Fire webhook
     """
-    return _run_async(_run_ocr_job(job_id, extra_data or {}))
+    try:
+        return _run_async(_run_ocr_job(job_id, extra_data or {}))
+    except Exception as exc:
+        raise self.retry(exc=exc) from exc
 
 
 async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
@@ -92,6 +95,9 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
     log = logger.bind(job_id=job_id[:8], task="process_ocr_job")
     tmp_input: str | None = None
     tmp_result: str | None = None
+    extra_tmp_paths: list[str] = []
+    result_key: str | None = None
+    user_id: str | None = None
 
     try:
         # 1. Fetch job
@@ -112,7 +118,17 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
         log.info("job.started", object_key=object_key, job_type=job_type)
 
         # 2. Download source from MinIO
-        ext = Path(original_filename).suffix or ".bin"
+        # Extension comes from object_key (the real stored file — MinIO keys
+        # are always suffixed with the actual upload's extension, see
+        # storage_service.build_upload_key), not original_filename. Studio
+        # operations like images_to_pdf set original_filename to the
+        # OUTPUT's display name (e.g. "combined_3_images.pdf") while
+        # file_path/object_key still points at the source image — deriving
+        # the suffix from original_filename there downloaded a real JPEG
+        # into a file named tmp_XXXX.pdf, and fitz.open() then tried to
+        # parse it as PDF based on that extension and failed with
+        # "FileDataError: Failed to open file ... as type pdf", verified live.
+        ext = Path(object_key).suffix or Path(original_filename).suffix or ".bin"
         tmp_input = await storage_service.download_to_temp(object_key, suffix=ext)
 
         # 3. Resolve multi-file extra keys for Studio operations
@@ -121,14 +137,12 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
         resolved_extra = dict(extra_data or {})
 
         if "input_paths_keys" in resolved_extra:
-            extra_tmp_paths = []
             for key in resolved_extra.pop("input_paths_keys"):
                 tmp = await storage_service.download_to_temp(key, suffix=".pdf")
                 extra_tmp_paths.append(tmp)
             resolved_extra["input_paths"] = extra_tmp_paths
 
         if "image_paths_keys" in resolved_extra:
-            extra_tmp_paths = []
             for key in resolved_extra.pop("image_paths_keys"):
                 ext = Path(key).suffix or ".jpg"
                 tmp = await storage_service.download_to_temp(key, suffix=ext)
@@ -149,7 +163,6 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
         )
 
         # 4. Upload result file (docx etc.) to MinIO
-        result_key: str | None = None
         local_result_path: str | None = ocr_result.get("file_path")
 
         if local_result_path and os.path.exists(local_result_path):
@@ -268,6 +281,11 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
 
     except Exception as exc:
         log.error("job.crashed", error=str(exc), exc_info=True)
+        if result_key:
+            try:
+                await storage_service.delete_object(result_key)
+            except Exception:
+                log.warning("job.result_cleanup_failed", result_key=result_key)
         try:
             async with AsyncSessionLocal() as db:
                 job = await db.get(OCRJob, job_id)
@@ -281,29 +299,30 @@ async def _run_ocr_job(job_id: str, extra_data: dict | None = None) -> dict:
             # handler can run before that variable is ever assigned (e.g. the
             # job lookup itself failed), so a generic phrase avoids a NameError
             # inside an already-failing exception handler.
-            async with AsyncSessionLocal() as notif_db:
-                notif = await create_notification(
-                    notif_db, user_id, type="job", status="failed",
-                    title="Extraction failed",
-                    message=f"Job {job_id[:8]} could not be processed: {str(exc)[:200]}",
-                    link="/history", entity_type="ocr_job", entity_id=job_id,
+            if user_id:
+                async with AsyncSessionLocal() as notif_db:
+                    notif = await create_notification(
+                        notif_db, user_id, type="job", status="failed",
+                        title="Extraction failed",
+                        message=f"Job {job_id[:8]} could not be processed: {str(exc)[:200]}",
+                        link="/history", entity_type="ocr_job", entity_id=job_id,
+                    )
+                _publish_sse(
+                    user_id,
+                    "job_update",
+                    {
+                        "job_id": job_id,
+                        "status": "failed",
+                        "error_message": str(exc),
+                        "notification": notif,
+                    },
                 )
-            _publish_sse(
-                user_id,
-                "job_update",
-                {
-                    "job_id": job_id,
-                    "status": "failed",
-                    "error_message": str(exc),
-                    "notification": notif,
-                },
-            )
         except Exception:
             pass
         raise
 
     finally:
-        for tmp in (tmp_input, tmp_result):
+        for tmp in (tmp_input, tmp_result, *extra_tmp_paths):
             if tmp:
                 try:
                     os.unlink(tmp)

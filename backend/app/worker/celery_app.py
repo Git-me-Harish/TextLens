@@ -19,10 +19,12 @@ Routing
     celery -A app.worker.celery_app worker -Q webhooks --concurrency=8
 """
 
+import sys
+
 import structlog
 from app.core.config import settings
 from celery import Celery
-from celery.signals import worker_ready
+from celery.signals import worker_process_init
 
 logger = structlog.get_logger(__name__)
 
@@ -63,10 +65,20 @@ celery_app.conf.update(
     },
 )
 
-@worker_ready.connect
+@worker_process_init.connect
 def _warm_ocr_imports(**_kwargs) -> None:
     """
     Pre-import the OCR stack at worker startup instead of inside the first task.
+
+    Bound to `worker_process_init`, not `worker_ready` — verified live that
+    this actually matters, not just style: Celery's prefork pool forks its
+    child processes (the ones that run tasks) *before* `worker_ready` fires
+    in the master. A handler on `worker_ready` only ever warms the master's
+    own memory — a process that never executes a task — while every pool
+    child still pays the full cold-import cost on its own first job, with
+    every one of them paying it independently. `worker_process_init` fires
+    inside each child right after it forks, which is the process that
+    actually needs to be warm.
 
     _run_ocr_job imports pytesseract/fitz lazily (function-level, to keep
     module import cheap and sidestep circularity). The cost doesn't disappear
@@ -87,10 +99,53 @@ def _warm_ocr_imports(**_kwargs) -> None:
     try:
         import time
         started = time.monotonic()
-        from app.services.ocr_service import process_job  # noqa: F401
+        from app.services import ocr_service
         logger.info("worker.ocr_imports_warmed", seconds=round(time.monotonic() - started, 2))
     except Exception as exc:
         logger.warning("worker.ocr_warmup_failed", error=str(exc))
+        return
+
+    # PaddleOCR's pipeline construction (loading ~1.8GB of model weights) is
+    # a different order of magnitude from the import above — 60-80s measured
+    # live, against single-digit seconds for the plain import. Without this,
+    # that cost lands on whoever's job happens to be first after a worker
+    # restart, same failure mode the import warm-up above already exists to
+    # prevent. Gated on ocr_service.PADDLE_ENABLED, not just "is it
+    # installed" — the package is baked into every Linux Docker image
+    # unconditionally, but actually building this pipeline costs ~1.7GB RAM,
+    # verified live to crash smaller machines. Defaults OFF (see
+    # ENABLE_STRUCTURED_OCR in config.py); a peer running this project with
+    # zero setup gets Tesseract-only extraction and never pays this cost.
+    #
+    # Gated on this process actually consuming the `ocr` queue. Verified
+    # live: with every worker process warming its own ~1.8GB pipeline
+    # unconditionally, celery-actions (queue=actions only, never touches
+    # OCR — see docker-compose.yml) was paying that memory cost for nothing,
+    # and it was enough on its own to push a real OCR run over this
+    # deployment's memory budget. `-Q`/`--queues` is how docker-compose
+    # assigns queues to each service; no flag at all falls back to Celery's
+    # own default of consuming every queue, so that case still warms.
+    #
+    # Now that this runs per pool child (see above), an `ocr`-serving worker
+    # with concurrency > 1 means that many ~1.8GB pipelines get built
+    # concurrently at boot — celery-worker-ocr in docker-compose.yml is
+    # deliberately concurrency=1 for exactly this reason; raising it without
+    # raising the memory budget to match will OOM the host, verified live.
+    queues_arg = None
+    for i, arg in enumerate(sys.argv):
+        if arg in ("-Q", "--queues") and i + 1 < len(sys.argv):
+            queues_arg = sys.argv[i + 1]
+        elif arg.startswith("--queues="):
+            queues_arg = arg.split("=", 1)[1]
+    serves_ocr = queues_arg is None or "ocr" in queues_arg.split(",")
+
+    if ocr_service.PADDLE_ENABLED and serves_ocr:
+        try:
+            started = time.monotonic()
+            ocr_service._get_paddle_pipeline()
+            logger.info("worker.paddle_pipeline_warmed", seconds=round(time.monotonic() - started, 2))
+        except Exception as exc:
+            logger.warning("worker.paddle_warmup_failed", error=str(exc))
 
 
 # Beat schedule — check for due ScheduledBatches every 60 seconds

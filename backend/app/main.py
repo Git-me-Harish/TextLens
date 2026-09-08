@@ -198,13 +198,28 @@ async def health_deps():
         deps["minio_reachable"] = True  # head_object returned without raising
     except Exception:
         deps["minio_reachable"] = False
-    all_ok = all(v for k, v in deps.items() if k not in ("OpenCV", "minio_reachable"))
+    all_ok = all(
+        value
+        for key, value in deps.items()
+        if key not in (
+            "OpenCV",
+            "Tesseract languages configured",
+            "Tesseract languages missing",
+            # A deliberate feature flag (see ENABLE_STRUCTURED_OCR in
+            # config.py), not a dependency health signal — false is the
+            # correct, expected default, not degradation. "installed" stays
+            # in the all_ok check below; that one *is* a real health signal.
+            "PaddleOCR (structured parsing) enabled",
+        )
+    ) and not deps["Tesseract languages missing"]
     return {"status": "ok" if all_ok else "degraded", "dependencies": deps}
 
 
 @app.get("/health/test-ocr", tags=["health"])
 async def test_ocr():
     import asyncio
+    import tempfile
+    from pathlib import Path
 
     from app.services.ocr_service import process_job
 
@@ -218,18 +233,22 @@ async def test_ocr():
             "TextLens OCR test\nInvoice #TEST-001\nAmount: $1,234.56",
             fontsize=14,
         )
-        tmp_path = "/tmp/ocr_health_test.pdf"
-        doc.save(tmp_path)
-        doc.close()
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, process_job, "pdf_extract", tmp_path, {}
-        )
-        return {
-            "status": "ok" if not result["error"] else "fail",
-            "extracted_text": result.get("text", "")[:200],
-            "error": result.get("error"),
-            "processing_time_ms": result.get("processing_time_ms"),
-        }
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            doc.save(str(tmp_path))
+            doc.close()
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, process_job, "pdf_extract", str(tmp_path), {}
+            )
+            return {
+                "status": "ok" if not result["error"] else "fail",
+                "extracted_text": result.get("text", "")[:200],
+                "error": result.get("error"),
+                "processing_time_ms": result.get("processing_time_ms"),
+            }
+        finally:
+            tmp_path.unlink(missing_ok=True)
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

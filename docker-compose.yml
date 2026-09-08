@@ -98,7 +98,38 @@ services:
       - ./backend/.env
     environment:
       <<: *backend-env
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4 -Q default,ocr,agents,ingest
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4 -Q default,agents,ingest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Always the queue that actually processes scanned pages — Tesseract or
+  # PaddleOCR, whichever ENABLE_STRUCTURED_OCR selects (see config.py), so
+  # this service must run for extraction to work at all, on any machine that
+  # just clones the repo. Split out from celery-worker because when
+  # PaddleOCR *is* enabled, PP-StructureV3's model cascade runs ~1.8GB per
+  # pool child (verified live), and celery_app.py's warm-up builds one at
+  # boot for every child an `ocr`-serving worker has. concurrency=4 shared
+  # with default/agents/ingest tried to build up to 4 of those concurrently
+  # and took the whole Docker Desktop VM down with it, not just the
+  # container. concurrency=1 here keeps at most one pipeline in memory;
+  # raise it only alongside the memory budget, not independently. With the
+  # flag off (the default), this service is just a normal lightweight
+  # Tesseract worker — concurrency=1 costs a little throughput there too,
+  # an acceptable trade for one predictable code path either way.
+  celery-worker-ocr:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      <<: *backend-env
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Q ocr
     depends_on:
       postgres:
         condition: service_healthy

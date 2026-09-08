@@ -4,7 +4,7 @@ import {
   LayoutDashboard, History, LogOut, User, Menu, X,
   FileText, Cpu, ClipboardList, ChevronDown, ChevronRight,
   Layers, Key, Webhook, ShieldCheck, Zap, Upload,
-  HeartPulse, Scale, Truck, GraduationCap, Building2, FileSearch,
+  HeartPulse, Scale, Truck, GraduationCap, Building2,
   TrendingUp, MessageSquare, CalendarClock, Briefcase, Wand2,
   Trash2,
 } from "lucide-react";
@@ -24,8 +24,11 @@ const NAV = [
   {
     label: "Process",
     items: [
-      { label: "Quick Extract",    icon: FileText,    to: "/tools/pdf-extract" },
-      { label: "Image OCR",        icon: FileSearch,  to: "/tools/ocr-image" },
+      // Quick Extract and Image OCR used to be two separate nav entries for
+      // the same page (ImageOCRPage was already just a redirect to
+      // UniversalExtractorPage) — one entry, pointed straight at the real
+      // route instead of through the redirect shim.
+      { label: "Quick Extract",    icon: FileText,    to: "/tools/extract" },
       { label: "PDF Chat",         icon: FileText,    to: "/tools/pdf-chat" },
       { label: "Document Studio",  icon: Wand2,       to: "/tools/studio" },
       { label: "Chat History",     icon: MessageSquare, to: "/chat-history" },

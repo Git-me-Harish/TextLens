@@ -16,7 +16,7 @@ Signature of chat_with_document:
 Everything else is unchanged:
   - Groq llama-3.3-70b-versatile LLM
   - MAX_HISTORY_TURNS trimming
-  - generate_suggested_questions()
+  - generate_session_title_and_questions()
   - Response shape: {answer, model, error}
 """
 import json
@@ -54,7 +54,9 @@ Rules:
 - If the answer isn't in the excerpts, say: \
 "This information isn't in the provided document sections."
 - Use markdown: **bold** key values, tables for structured data, \
-bullet lists for multi-part answers.
+bullet lists for multi-part answers, and always wrap any code, commands, \
+formulas, or other literal technical text in a fenced code block \
+(```` ```language ... ``` ````) — never inline it as plain prose.
 - Be thorough but concise. Lead with the direct answer.
 - Do not invent excerpt numbers or citations — only reference an excerpt \
 number if you are certain which one the fact came from.
@@ -65,8 +67,13 @@ number if you are certain which one the fact came from.
 """
 
 SUGGEST_PROMPT = """\
-Analyze this document excerpt and generate exactly 3 short, specific questions \
-a user would genuinely want to ask about it.
+Analyze this document excerpt and produce two things:
+1. A short, specific chat session title describing what this document is \
+about (under 8 words, no filler like "Document about" or a trailing period) — \
+not the filename, an actual title someone would recognize this conversation \
+by later.
+2. Exactly 3 short, specific questions a user would genuinely want to ask \
+about it.
 - Each question must be answerable from the document
 - Under 12 words each
 - No generic questions like "What is this document about?"
@@ -74,8 +81,8 @@ a user would genuinely want to ask about it.
 Document excerpt:
 {excerpt}
 
-Respond ONLY with a JSON array of 3 strings. No markdown, no preamble.
-Example: ["Question one?", "Question two?", "Question three?"]
+Respond ONLY with a JSON object, no markdown, no preamble. Example:
+{{"title": "Q3 Revenue Forecast Memo", "questions": ["Question one?", "Question two?", "Question three?"]}}
 """
 
 
@@ -184,26 +191,38 @@ async def chat_with_document(
     }
 
 
-async def generate_suggested_questions(document_text: str) -> list[str]:
+async def generate_session_title_and_questions(document_text: str) -> tuple[str | None, list[str]]:
     """
-    Generate 3 document-specific starter questions.
-    Uses the first SUGGEST_EXCERPT chars — no retrieval needed.
-    Unchanged from V1.
+    Generate a content-derived chat session title plus 3 starter questions,
+    in a single Groq call. Uses the first SUGGEST_EXCERPT chars — no
+    retrieval needed.
+
+    Was two separate concerns that used to cost nothing extra to combine:
+    the title used to just be the source PDF's filename (set once at
+    session creation, never reflecting what was actually discussed), and
+    this call was already being made for the suggested questions anyway.
+    Returns (None, []) on any failure — callers fall back to the filename,
+    same as before this existed.
     """
     prompt = SUGGEST_PROMPT.format(excerpt=document_text[:SUGGEST_EXCERPT])
     result = await _groq_call(
         [{"role": "user", "content": prompt}],
-        max_tokens=200,
+        max_tokens=250,
         temperature=0.5,
     )
     if result["error"] or not result["content"]:
-        return []
+        return None, []
     try:
         raw = result["content"].strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        return [q for q in json.loads(raw.strip()) if isinstance(q, str)][:3]
+        parsed = json.loads(raw.strip())
+        title = parsed.get("title") if isinstance(parsed, dict) else None
+        title = title.strip() if isinstance(title, str) and title.strip() else None
+        questions = parsed.get("questions") if isinstance(parsed, dict) else None
+        questions = [q for q in questions if isinstance(q, str)][:3] if isinstance(questions, list) else []
+        return title, questions
     except Exception:
-        return []
+        return None, []

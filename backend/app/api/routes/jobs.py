@@ -45,7 +45,8 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 # Constants 
 
 ALLOWED_IMAGE_TYPES = frozenset({
-    "image/jpeg", "image/png", "image/webp", "image/tiff", "image/bmp"
+    "image/jpeg", "image/png", "image/webp", "image/tiff", "image/bmp",
+    "image/heic", "image/heif",
 })
 ALLOWED_PDF_TYPE = "application/pdf"
 
@@ -57,6 +58,8 @@ _EXT_TO_MIME: dict[str, str] = {
     ".tiff": "image/tiff",
     ".tif":  "image/tiff",
     ".bmp":  "image/bmp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
     ".webp": "image/webp",
 }
 
@@ -73,7 +76,7 @@ def _resolve_content_type(raw: str, filename: str) -> str:
 
 
 def _allowed(content_type: str, job_type: str) -> bool:
-    if job_type == JobType.ocr_image.value:
+    if job_type in {JobType.ocr_image.value, JobType.image_to_pdf.value}:
         return content_type in ALLOWED_IMAGE_TYPES
     return content_type == ALLOWED_PDF_TYPE
 
@@ -98,11 +101,22 @@ def _sniff_content_type(content: bytes) -> str | None:
         return "image/bmp"
     if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
         return "image/webp"
+    # HEIC/HEIF is an ISO-BMFF container (same box structure as MP4): bytes
+    # 4-8 are the literal 'ftyp' box tag, and 8-12 are a 4-char brand code
+    # that says what's actually inside. Multiple brands mean "this is a
+    # HEIC/HEIF image" depending on which capture pipeline wrote it (Apple's
+    # own encoder uses heic/heix; some Android/other encoders emit mif1).
+    if content[4:8] == b"ftyp" and content[8:12] in (
+        b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1",
+    ):
+        return "image/heic"
     return None
 
 
 def _validate_job_type(job_type: str) -> None:
-    valid = [jt.value for jt in JobType]
+    # PDF editing is completed by the dedicated Studio route and must not be
+    # queued through the generic worker dispatcher.
+    valid = [jt.value for jt in JobType if jt != JobType.pdf_edit]
     if job_type not in valid:
         raise HTTPException(status_code=400, detail=f"Invalid job_type. Choose from: {valid}")
 
@@ -168,7 +182,7 @@ async def upload_file(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"File content does not match an allowed {'image' if job_type == JobType.ocr_image.value else 'PDF'} "
+                f"File content does not match an allowed {'image' if job_type in {JobType.ocr_image.value, JobType.image_to_pdf.value} else 'PDF'} "
                 f"format. The file's actual bytes were checked, not just its name or declared type."
             ),
         )
@@ -176,7 +190,11 @@ async def upload_file(
 
     file_hash = hashlib.sha256(content).hexdigest()
 
-    # Duplicate detection — same bytes already processed by this user
+    # Duplicate detection — same bytes already processed by this user, for
+    # this same operation. Scoped by job_type too: the same source PDF is a
+    # legitimate, distinct job for Quick Extract vs PDF→Word vs Compress —
+    # they produce different results, so matching on file_hash alone falsely
+    # blocked a file the user had simply already run through a different tool.
     existing = (await db.execute(
         select(OCRJob)
         # Trashed uploads must not block a re-upload: the user deleted it,
@@ -184,6 +202,7 @@ async def upload_file(
         .where(
             OCRJob.user_id == user.id,
             OCRJob.file_hash == file_hash,
+            OCRJob.job_type == job_type,
             OCRJob.deleted_at.is_(None),
         )
         .order_by(OCRJob.created_at.desc())
@@ -200,24 +219,42 @@ async def upload_file(
             },
         )
 
-    # Upload to MinIO — object key is the file's address from now on
+    # Upload and persist before dispatching so the worker never sees an
+    # uncommitted job. Clean up the object if either step fails.
     object_key = storage_service.build_upload_key(user.id, file.filename or "upload")
-    await storage_service.upload_bytes(content, object_key, content_type)
+    uploaded = False
+    job = None
+    job_committed = False
+    try:
+        await storage_service.upload_bytes(content, object_key, content_type)
+        uploaded = True
 
-    job = OCRJob(
-        user_id=user.id,
-        job_type=job_type,
-        status=JobStatus.processing,
-        original_filename=file.filename or "unknown",
-        file_path=object_key,
-        file_hash=file_hash,
-    )
-    db.add(job)
-    await db.flush()
-    await db.refresh(job)
+        job = OCRJob(
+            user_id=user.id,
+            job_type=job_type,
+            status=JobStatus.processing,
+            original_filename=file.filename or "unknown",
+            file_path=object_key,
+            file_hash=file_hash,
+        )
+        db.add(job)
+        await db.commit()
+        job_committed = True
+        await db.refresh(job)
 
-    extra_data = {"ratio": ratio} if job_type == JobType.pdf_summarize.value and ratio is not None else None
-    process_ocr_job.delay(job.id, extra_data)
+        extra_data = {"ratio": ratio} if job_type == JobType.pdf_summarize.value and ratio is not None else None
+        process_ocr_job.delay(job.id, extra_data)
+    except Exception:
+        if job_committed and job is not None:
+            job.status = JobStatus.failed
+            job.error_message = "Unable to queue OCR job for processing."
+            await db.commit()
+        else:
+            await db.rollback()
+        if uploaded:
+            await storage_service.delete_object(object_key)
+        raise
+
     logger.info("job.queued", job_id=job.id[:8], job_type=job_type, size_bytes=len(content))
     return job
 
@@ -349,7 +386,14 @@ async def download_result(
     if not job.result_file_path:
         raise HTTPException(status_code=404, detail="No result file available for this job.")
 
-    download_filename = f"textlens_{job.original_filename}"
+    # Extension from the actual result file, not original_filename — for
+    # pdf_to_markdown/pdf_to_word the result is a different format than the
+    # source upload (.md/.docx vs .pdf), and original_filename still names
+    # the source. Using it unconditionally handed back "textlens_resume.pdf"
+    # for a job whose downloaded bytes were genuinely Markdown — verified live.
+    base_name = Path(job.original_filename).stem
+    result_ext = Path(job.result_file_path).suffix or Path(job.original_filename).suffix
+    download_filename = f"textlens_{base_name}{result_ext}"
     presigned_url = await storage_service.get_presigned_url(
         job.result_file_path,
         expires_in=3600,

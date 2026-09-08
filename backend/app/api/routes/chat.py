@@ -16,7 +16,7 @@ from app.api.deps import get_current_user
 from app.core.limiter import limiter
 from app.db.database import get_db
 from app.models.models import ChatSession, JobStatus, JobType, OCRJob, User
-from app.services.chat_service import chat_with_document, generate_suggested_questions
+from app.services.chat_service import chat_with_document, generate_session_title_and_questions
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -79,6 +79,7 @@ class AskResponse(BaseModel):
 class SessionOut(BaseModel):
     id: str
     title: str
+    pinned: bool
     job_id: str
     original_filename: str
     message_count: int
@@ -87,6 +88,18 @@ class SessionOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SessionUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    pinned: bool | None = None
+
+    @field_validator("title")
+    @classmethod
+    def not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("Title cannot be blank.")
+        return v.strip() if v else v
 
 
 class ChattableDocumentOut(BaseModel):
@@ -215,12 +228,15 @@ async def start_session(
     if not job.result_text:
         raise HTTPException(400, "Document has no extracted text")
 
-    questions = await generate_suggested_questions(job.result_text)
+    generated_title, questions = await generate_session_title_and_questions(job.result_text)
 
     session = ChatSession(
         user_id=user.id,
         job_id=job.id,
-        title=job.original_filename,
+        # Falls back to the filename only if generation failed (no GROQ_API_KEY,
+        # API error, unparseable response) — same degrade-to-what-we-had-before
+        # shape as every other optional-LLM-call feature in this app.
+        title=generated_title or job.original_filename,
         messages=[],
         suggested_questions=questions,
     )
@@ -277,7 +293,7 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List the user's chat sessions with metadata, newest-updated first."""
+    """List the user's chat sessions with metadata — pinned first, then newest-updated."""
     res = await db.execute(
         select(ChatSession, OCRJob.original_filename)
         .join(OCRJob, ChatSession.job_id == OCRJob.id)
@@ -288,7 +304,7 @@ async def list_sessions(
             # so hide it too rather than listing a link that 404s on open.
             OCRJob.deleted_at.is_(None),
         )
-        .order_by(ChatSession.updated_at.desc())
+        .order_by(ChatSession.pinned.desc(), ChatSession.updated_at.desc())
         .limit(per_page)
         .offset((page - 1) * per_page)
     )
@@ -297,6 +313,7 @@ async def list_sessions(
         SessionOut(
             id=s.id,
             title=s.title,
+            pinned=s.pinned,
             job_id=s.job_id,
             original_filename=filename,
             message_count=len(s.messages or []),
@@ -326,6 +343,7 @@ async def get_session(
     return {
         "id": session.id,
         "title": session.title,
+        "pinned": session.pinned,
         "job_id": session.job_id,
         "original_filename": filename,
         "messages": session.messages or [],
@@ -333,6 +351,36 @@ async def get_session(
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     }
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionOut)
+async def update_session(
+    session_id: str,
+    data: SessionUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Rename a session and/or toggle pinned — both optional, either alone or together."""
+    session = await _get_owned_session(db, session_id, user.id)
+    if data.title is not None:
+        session.title = data.title
+    if data.pinned is not None:
+        session.pinned = data.pinned
+    await db.commit()
+    await db.refresh(session)
+
+    res = await db.execute(select(OCRJob.original_filename).where(OCRJob.id == session.job_id))
+    filename = res.scalar_one_or_none() or ""
+    return SessionOut(
+        id=session.id,
+        title=session.title,
+        pinned=session.pinned,
+        job_id=session.job_id,
+        original_filename=filename,
+        message_count=len(session.messages or []),
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
 
 
 @router.delete("/sessions/{session_id}", status_code=204)

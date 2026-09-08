@@ -35,11 +35,6 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
-    # Separate redirect URI for the "Connect Google Calendar" integration flow
-    # (distinct from the login flow above — different scope, different callback
-    # handler). Uses the same GOOGLE_CLIENT_ID/SECRET (same Google Cloud project),
-    # but this exact URL must also be added to that OAuth client's "Authorized
-    # redirect URIs" in Google Cloud Console, or Google will reject the request.
     GOOGLE_CALENDAR_REDIRECT_URI: str = "http://localhost:8000/api/v1/credentials/google_calendar/callback"
 
     # CORS 
@@ -54,15 +49,19 @@ class Settings(BaseSettings):
 
     # Upload constraints
     MAX_FILE_SIZE_MB: int = 50
-
-    # Tesseract language packs to load, '+'-joined (e.g. "eng+hin+tam").
-    # Tesseract combines the dictionaries of every language listed, so this
-    # trades a small per-call latency cost for recognizing more scripts —
-    # default is conservative (English + Hindi) rather than loading every
-    # Indian language pack unconditionally. Extend via env var once you know
-    # which scripts your actual documents contain; each extra language also
-    # needs its .traineddata package installed (see Dockerfile).
     TESSERACT_LANGUAGES: str = "eng+hin"
+
+    # Structured OCR (PaddleOCR / PP-StructureV3) — real table/formula/
+    # handwriting-aware extraction, layered on top of the always-available
+    # Tesseract path (see ocr_service.py). Defaults to OFF: the model
+    # cascade needs ~1.7GB RAM at inference time, verified live to crash
+    # smaller dev machines when left always-on. The `ocr` queue is always
+    # consumed regardless of this flag — Tesseract extraction keeps working
+    # out of the box for anyone running this project with zero setup;
+    # this only gates the heavier engine on top of it. Flip to true in your
+    # own .env (never commit it as true) once you've confirmed your machine
+    # has the headroom — Docker Desktop's WSL2 VM needs several GB free.
+    ENABLE_STRUCTURED_OCR: bool = False
 
     # Rate limiting 
     RATE_LIMIT_PER_MINUTE: int = 30
@@ -98,16 +97,6 @@ class Settings(BaseSettings):
     )
     ACTION_CELERY_QUEUE: str = Field(default="actions")
     ACTION_TASK_TIME_LIMIT: int = Field(default=330)
-    # All five are self-hosted on this same backend (see
-    # app/api/routes/mcp_google_calendar.py, mcp_email.py, mcp_pharmacy.py,
-    # mcp_job_board.py, mcp_accounting.py) — the default must point at the
-    # local route, not a placeholder, since a deploy that doesn't explicitly
-    # set these env vars would otherwise silently try to reach a domain
-    # that doesn't exist. Only google_calendar is a genuine third-party
-    # integration (per-user Google OAuth); the rest are real, working
-    # implementations backed by this app's own database, standing in for
-    # partner accounts this project doesn't have — see each proxy's
-    # module docstring for why, and what it'd take to swap in a real one.
     GOOGLE_CALENDAR_MCP_URL: str = "http://localhost:8000/mcp/google-calendar"
     EMAIL_MCP_URL: str = "http://localhost:8000/mcp/email"
     PHARMACY_MCP_URL: str = "http://localhost:8000/mcp/pharmacy"

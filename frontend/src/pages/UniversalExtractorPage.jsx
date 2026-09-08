@@ -1,7 +1,7 @@
 /**
  * UniversalExtractorPage — merges ImageOCRPage + PDFExtractPage.
  *
- * Accepts: PDF, JPG, PNG, TIFF, WEBP, BMP
+ * Accepts: PDF, JPG, PNG, TIFF, WEBP, BMP, HEIC/HEIF
  * Auto-selects job_type based on file:
  *   PDF → pdf_extract (or pdf_to_markdown if Markdown format selected)
  *   Image → ocr_image
@@ -17,7 +17,7 @@ import {
     Download, Sparkles, RotateCcw, Clock, Hash, Layers,
 } from "lucide-react";
 import toast from "react-hot-toast";
-import api, { errMsg } from "../lib/api";
+import api, { errMsg, downloadJobResult } from "../lib/api";
 import { Spinner } from "../components/ui";
 import { waitForJobSSE, isTerminalStatus } from "../hooks/useSSE";
 import { usePersistedState, useHydratedRecord } from "../lib/usePersistedState";
@@ -25,14 +25,24 @@ import { usePersistedState, useHydratedRecord } from "../lib/usePersistedState";
 /* File type resolution */
 
 const PDF_MIME = "application/pdf";
-const IMAGE_MIMES = new Set(["image/jpeg", "image/jpg", "image/png", "image/tiff", "image/tif", "image/webp", "image/bmp", "image/heic"]);
+const IMAGE_MIMES = new Set([
+    "image/jpeg", "image/jpg", "image/png", "image/tiff", "image/tif",
+    "image/webp", "image/bmp", "image/heic", "image/heif",
+]);
+// Explicit extensions alongside each MIME type — HEIC in particular is
+// notoriously inconsistent about what content-type browsers report for it
+// (varies by OS and browser; some report nothing at all), so react-dropzone
+// needs the extension as a second way to recognize the file, not just the
+// MIME type this Set already handles above.
 const ACCEPT = {
-    "application/pdf": [],
-    "image/jpeg": [],
-    "image/png": [],
-    "image/tiff": [],
-    "image/webp": [],
-    "image/bmp": [],
+    "application/pdf": [".pdf"],
+    "image/jpeg": [".jpg", ".jpeg"],
+    "image/png": [".png"],
+    "image/tiff": [".tiff", ".tif"],
+    "image/webp": [".webp"],
+    "image/bmp": [".bmp"],
+    "image/heic": [".heic"],
+    "image/heif": [".heif"],
 };
 
 function resolveJobType(file, format) {
@@ -113,7 +123,10 @@ function ResultPanel({ job, text, format, onReset }) {
                         </button>
                     )}
                     {job.result_file_path && (
-                        <button onClick={() => window.open(`/api/v1/jobs/${job.id}/download`, "_blank")} className="btn btn-outline btn-sm">
+                        <button
+                            onClick={() => downloadJobResult(job).catch(err => toast.error(errMsg(err, "Download failed")))}
+                            className="btn btn-outline btn-sm"
+                        >
                             <Download size={13} /> Download file
                         </button>
                     )}
@@ -279,7 +292,7 @@ export default function UniversalExtractorPage() {
                 <div>
                     <h1 className="page-title">Universal Extractor</h1>
                     <p className="page-subtitle">
-                        Extract text from any document — PDF, JPG, PNG, TIFF, WEBP, BMP
+                        Extract text from any document — PDF, JPG, PNG, TIFF, WEBP, BMP, HEIC
                     </p>
                 </div>
             </div>

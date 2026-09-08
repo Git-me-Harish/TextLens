@@ -3,7 +3,7 @@ import { Trash2, Download, ChevronLeft, ChevronRight, RotateCcw, AlertCircle, Fi
 import toast from "react-hot-toast";
 import { useConfirm } from "../lib/useConfirm";
 import { formatDistanceToNow } from "date-fns";
-import api, { errMsg } from "../lib/api";
+import api, { errMsg, downloadJobResult } from "../lib/api";
 import { Badge, Spinner } from "../components/ui";
 
 const STATUS_BADGE = { completed: "success", failed: "danger", processing: "processing", pending: "warning" };
@@ -179,7 +179,10 @@ export default function HistoryPage() {
                           </button>
                         )}
                         {job.result_file_path && (
-                          <button onClick={() => window.open(`/api/jobs/${job.id}/download`, "_blank")} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent)", padding: 4 }}>
+                          <button
+                            onClick={() => downloadJobResult(job).catch(err => toast.error(errMsg(err, "Download failed")))}
+                            style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent)", padding: 4 }}
+                          >
                             <Download size={14} />
                           </button>
                         )}

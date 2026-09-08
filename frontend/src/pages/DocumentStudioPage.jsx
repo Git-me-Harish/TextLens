@@ -6,7 +6,7 @@ import {
   Upload, X, ChevronRight, ChevronLeft, PenLine, Sparkles,
 } from "lucide-react";
 import toast from "react-hot-toast";
-import api, { errMsg } from "../lib/api";
+import api, { errMsg, downloadJobResult } from "../lib/api";
 import { Spinner } from "../components/ui";
 import { waitForJobSSE } from "../hooks/useSSE";
 import { usePersistedState, useHydratedRecord } from "../lib/usePersistedState";
@@ -94,8 +94,8 @@ const ACTIONS = [
     icon:        ImageIcon,
     color:       "#0891b2",
     bg:          "#ecfeff",
-    accept:      { "image/jpeg": [], "image/png": [], "image/tiff": [], "image/webp": [] },
-    acceptLabel: "JPG, PNG, TIFF, WEBP (1–10)",
+    accept:      { "image/jpeg": [], "image/png": [], "image/tiff": [], "image/webp": [], "image/heic": [".heic"], "image/heif": [".heif"] },
+    acceptLabel: "JPG, PNG, TIFF, WEBP, HEIC (1–10)",
     multi:       true,
     minFiles:    1,
     endpoint:    "studio/combine",
@@ -180,14 +180,16 @@ function ActionCard({ action, selected, onSelect }) {
 function ResultPanel({ job, action, onReset }) {
   const [downloading, setDownloading] = useState(false);
 
-  const download = () => {
+  const download = async () => {
     if (!job.id) return;
     setDownloading(true);
-    // Opens the presigned-redirect endpoint in a new tab — nothing to await
-    // here (the browser navigates that tab independently), so this is only
-    // ever a brief visual pulse rather than a real loading state.
-    window.open(`/api/v1/jobs/${job.id}/download`, "_blank");
-    setTimeout(() => setDownloading(false), 400);
+    try {
+      await downloadJobResult(job);
+    } catch (err) {
+      toast.error(errMsg(err, "Download failed"));
+    } finally {
+      setDownloading(false);
+    }
   };
 
   return (

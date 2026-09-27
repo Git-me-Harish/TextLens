@@ -169,7 +169,7 @@ async def get_credential(
     # google_calendar is the only OAuth service in the registry; every other
     # one is self-hosted with no per-user credential. Generalise if a second
     # one ever appears.
-    if service_name == "google_calendar" and is_expired(decrypted):
+    if service_name in {"google_calendar", "google_drive"} and is_expired(decrypted):
         refreshed = await refresh_google_token(decrypted)
         if refreshed:
             decrypted = refreshed

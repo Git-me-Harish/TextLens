@@ -562,34 +562,14 @@ async def classify_document(extracted_text: str) -> dict[str, Any]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "Content-Type": "application/json",
-                    "anthropic-version": "2023-06-01",
-                    "x-api-key": settings.ANTHROPIC_API_KEY,
-                },
-                json={
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 300,
-                    "system": DOMAIN_PROMPTS["general"]["auto_classify"],
-                    "messages": [{"role": "user", "content": f"Document text (first 3000 chars):\n\n{extracted_text[:3000]}"}],
-                },
-            )
-            data = response.json()
-            if response.status_code != 200:
-                return fallback
+        from app.services.llm_service import json_completion
 
-            raw = data["content"][0]["text"].strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-
-            result = json.loads(raw)
-            return result
-
+        return await json_completion(
+            system=DOMAIN_PROMPTS["general"]["auto_classify"],
+            user=f"Document text (first 3000 chars):\n\n{extracted_text[:3000]}",
+            max_tokens=300,
+            timeout=30.0,
+        )
     except Exception:
         return fallback
 
@@ -647,54 +627,24 @@ async def run_agent(
         )
 
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "Content-Type": "application/json",
-                    "anthropic-version": "2023-06-01",
-                    "x-api-key": settings.ANTHROPIC_API_KEY,
-                },
-                json={
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 4000,
-                    "system": system_prompt,
-                    "messages": [{"role": "user", "content": user_msg}],
-                },
-            )
-            data = response.json()
+        from app.services.llm_service import json_completion
 
-            if response.status_code != 200:
-                error_msg = data.get("error", {}).get("message", "Claude API error")
-                return {
-                    "error": error_msg,
-                    "structured_result": None,
-                    "summary": None,
-                    "confidence": 0,
-                    "processing_time_ms": int((time.time() - start) * 1000),
-                }
+        parsed = await json_completion(
+            system=system_prompt,
+            user=user_msg,
+            max_tokens=4000,
+            timeout=90.0,
+        )
+        summary: str | None = parsed.pop("summary", None)
+        confidence: int = int(parsed.pop("confidence", 85))
 
-            raw_text: str = data["content"][0]["text"].strip()
-
-            # Strip markdown fences if model adds them despite instructions
-            if raw_text.startswith("```"):
-                parts = raw_text.split("```")
-                raw_text = parts[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-                raw_text = raw_text.strip()
-
-            parsed: dict = json.loads(raw_text)
-            summary: str | None = parsed.pop("summary", None)
-            confidence: int = int(parsed.pop("confidence", 85))
-
-            return {
-                "structured_result": parsed,
-                "summary": summary,
-                "confidence": confidence,
-                "error": None,
-                "processing_time_ms": int((time.time() - start) * 1000),
-            }
+        return {
+            "structured_result": parsed,
+            "summary": summary,
+            "confidence": confidence,
+            "error": None,
+            "processing_time_ms": int((time.time() - start) * 1000),
+        }
 
     except json.JSONDecodeError as exc:
         # Return partial — summary from raw text is still useful

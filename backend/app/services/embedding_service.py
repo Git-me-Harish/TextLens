@@ -25,12 +25,16 @@ import asyncio
 import logging
 from typing import Any
 
-import voyageai
 import structlog
 
 from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
+
+try:
+    import voyageai
+except Exception:
+    voyageai = None
 
 _BATCH_SIZE = 128          # Voyage AI hard limit per request
 _VOYAGE_MODEL = None       # lazy-resolved from settings
@@ -43,11 +47,15 @@ def _get_model() -> str:
     return _VOYAGE_MODEL
 
 
-def _get_client() -> voyageai.AsyncClient:
+def _get_client() -> Any:
     """Lazy-init async client. One per event loop is fine — voyageai uses httpx internally."""
     if not settings.VOYAGE_API_KEY:
         raise RuntimeError(
             "VOYAGE_API_KEY is not set. Add it to your .env file to enable RAG chat."
+        )
+    if voyageai is None:
+        raise RuntimeError(
+            "Voyage AI dependencies are unavailable. Reinstall the backend requirements."
         )
     return voyageai.AsyncClient(api_key=settings.VOYAGE_API_KEY)
 

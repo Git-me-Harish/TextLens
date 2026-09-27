@@ -6,6 +6,8 @@ Credentials Routes — manage user MCP service integrations
   DELETE /api/v1/credentials/{service}                     — disconnect a service
   GET    /api/v1/credentials/google_calendar/connect-url   — start the Google Calendar OAuth flow
   GET    /api/v1/credentials/google_calendar/callback      — Google redirects here after consent
+    GET    /api/v1/credentials/google_drive/connect-url      — start the Google Drive OAuth flow
+    GET    /api/v1/credentials/google_drive/callback         — Google redirects here after consent
 """
 
 from datetime import datetime, timedelta, timezone
@@ -37,10 +39,12 @@ router = APIRouter(prefix="/credentials", tags=["MCP Credentials"])
 _GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+_GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 _OAUTH_STATE_TYPE = "google_calendar_oauth_state"
+_DRIVE_OAUTH_STATE_TYPE = "google_drive_oauth_state"
 
 
-def _generate_oauth_state(user_id: str) -> str:
+def _generate_oauth_state(user_id: str, state_type: str = _OAUTH_STATE_TYPE) -> str:
     """
     Short-lived signed token carrying the initiating user's id through the
     Google redirect round-trip — the callback is hit by the browser directly
@@ -49,14 +53,14 @@ def _generate_oauth_state(user_id: str) -> str:
     """
     payload = {
         "sub": user_id,
-        "type": _OAUTH_STATE_TYPE,
+        "type": state_type,
         "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
     }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
 
-def _verify_oauth_state(state: str) -> str:
+def _verify_oauth_state(state: str, state_type: str = _OAUTH_STATE_TYPE) -> str:
     """Returns the user_id encoded in the state token, or raises ValueError."""
     try:
         claims = jwt.decode(state, settings.SECRET_KEY, algorithms=["HS256"])
@@ -65,7 +69,7 @@ def _verify_oauth_state(state: str) -> str:
     except jwt.InvalidTokenError as exc:
         raise ValueError(f"Invalid state token: {exc}")
 
-    if claims.get("type") != _OAUTH_STATE_TYPE:
+    if claims.get("type") != state_type:
         raise ValueError("State token type mismatch.")
     user_id = claims.get("sub")
     if not user_id:
@@ -114,6 +118,11 @@ async def list_supported_services():
             "connection_type": "oauth",
             "fields": {},
         },
+        "google_drive": {
+            "description": "Google Drive files for document import and export",
+            "connection_type": "oauth",
+            "fields": {},
+        },
         "pharmacy_api": {
             "description": "Medicine search and ordering — runs on this platform's own catalog, nothing to connect.",
             "connection_type": "system",
@@ -142,7 +151,71 @@ async def list_supported_services():
             "fields": {"api_key": "Service API key"},
         })
         services[service_name] = {**entry, "mcp_url": server.base_url}
+    services["google_drive"] = credential_schemas["google_drive"]
     return {"services": services}
+
+
+@router.get("/google_drive/connect-url")
+async def google_drive_connect_url(current_user=Depends(get_current_user)):
+    if not settings.GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google OAuth is not configured on this server (GOOGLE_CLIENT_ID is empty).",
+        )
+    state = _generate_oauth_state(current_user.id, _DRIVE_OAUTH_STATE_TYPE)
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": settings.GOOGLE_DRIVE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": _GOOGLE_DRIVE_SCOPE,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+    }
+    return {"authorization_url": f"{_GOOGLE_AUTH_URL}?{urlencode(params)}"}
+
+
+@router.get("/google_drive/callback", include_in_schema=False)
+async def google_drive_callback(
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+):
+    integrations_url = f"{settings.FRONTEND_URL}/settings/integrations"
+    if error:
+        return RedirectResponse(f"{integrations_url}?error={error}")
+    if not code or not state:
+        return RedirectResponse(f"{integrations_url}?error=missing_code_or_state")
+    try:
+        user_id = _verify_oauth_state(state, _DRIVE_OAUTH_STATE_TYPE)
+    except ValueError:
+        return RedirectResponse(f"{integrations_url}?error=invalid_state")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        token_res = await client.post(_GOOGLE_TOKEN_URL, data={
+            "code": code,
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "redirect_uri": settings.GOOGLE_DRIVE_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        })
+    if token_res.status_code != 200:
+        return RedirectResponse(f"{integrations_url}?error=token_exchange_failed")
+
+    token_data = token_res.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return RedirectResponse(f"{integrations_url}?error=no_access_token_returned")
+    credentials = {
+        "access_token": access_token,
+        "expires_at": compute_expires_at(token_data.get("expires_in")),
+    }
+    if token_data.get("refresh_token"):
+        credentials["refresh_token"] = token_data["refresh_token"]
+
+    async with AsyncSessionLocal() as db:
+        await save_credential(db, user_id, "google_drive", credentials)
+    return RedirectResponse(f"{integrations_url}?connected=google_drive")
 
 
 @router.get(
@@ -301,7 +374,7 @@ async def delete_credentials(
     Permanently delete the stored credentials for the given service.
     Any action runs that require this service will fail until re-connected.
     """
-    if service_name not in MCP_REGISTRY:
+    if service_name not in MCP_REGISTRY and service_name != "google_drive":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unknown service '{service_name}'.",

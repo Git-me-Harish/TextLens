@@ -91,7 +91,7 @@ try:
     from paddleocr import PPStructureV3
 
     HAS_PADDLE = True
-except ImportError:
+except Exception:
     HAS_PADDLE = False
 
 try:

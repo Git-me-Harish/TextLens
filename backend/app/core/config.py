@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
     GOOGLE_CALENDAR_REDIRECT_URI: str = "http://localhost:8000/api/v1/credentials/google_calendar/callback"
+    GOOGLE_DRIVE_REDIRECT_URI: str = "http://localhost:8000/api/v1/credentials/google_drive/callback"
 
     # CORS 
     FRONTEND_URL: str = "http://localhost:5173"
@@ -69,11 +70,16 @@ class Settings(BaseSettings):
     # AI providers 
     ANTHROPIC_API_KEY: str = ""
     GROQ_API_KEY: str = ""
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    EXTRACTION_LLM_PROVIDER: str = "deepseek"
+    EXTRACTION_LLM_MODEL: str = "deepseek-chat"
 
     # Agentic action layer
     AGENT_MODEL: str = Field(
-        default="claude-sonnet-4-20250514",
-        description="Anthropic model ID used for all domain agents.",
+        default="claude-sonnet-4-6",
+        description="Anthropic model ID used only for agentic actions.",
     )
     AGENT_MAX_ITERATIONS: int = Field(default=15, ge=1, le=20)
     AGENT_MAX_TOOL_CALLS: int = Field(default=30, ge=1, le=50)
